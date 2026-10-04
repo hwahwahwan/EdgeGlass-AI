@@ -1,0 +1,3 @@
+# mac_mouse_bridge.py dependencies (install on macOS only)
+pyserial
+pyobjc-framework-Quartz
