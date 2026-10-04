@@ -3,6 +3,22 @@ import time
 
 
 # ============================================================
+# Air-mouse pointer tuning
+#
+# The hand position is used as a deflection from a neutral point, not as an
+# absolute screen coordinate.  Keeping the hand displaced at a frame edge
+# therefore continues moving the cursor in that direction.
+# ============================================================
+
+POINTER_VELOCITY_GAIN = 6.0
+POINTER_MAX_DT_MS = 100
+POINTER_DEAD_ZONE = 8
+
+DRAG_PALM_ALPHA = 0.45
+DRAG_DEAD_ZONE = 3
+
+
+# ============================================================
 # 기본 함수
 # ============================================================
 
@@ -111,7 +127,7 @@ def is_fist(points):
 
 class GestureController:
 
-    def __init__(self):
+    def __init__(self, pointer_size=None):
 
         # ----------------------------------------------------
         # CLICK = 엄지 + 검지 pinch
@@ -202,6 +218,26 @@ class GestureController:
         self.drag_start_palm_y = None
         self.drag_start_cursor_x = None
         self.drag_start_cursor_y = None
+        self.drag_filtered_palm_x = None
+        self.drag_filtered_palm_y = None
+
+
+        # ----------------------------------------------------
+        # Relative velocity pointer
+        # ----------------------------------------------------
+
+        self.pointer_float_x = None
+        self.pointer_float_y = None
+        self.pointer_center_x = None
+        self.pointer_center_y = None
+        self.pointer_last_ms = None
+
+        if pointer_size is None:
+            self.pointer_width = None
+            self.pointer_height = None
+        else:
+            self.pointer_width = float(pointer_size[0])
+            self.pointer_height = float(pointer_size[1])
 
 
     # ========================================================
@@ -283,6 +319,100 @@ class GestureController:
         return self.cursor_x, self.cursor_y
 
 
+    def hold_pointer_control(self, hand_x, hand_y, now):
+        """Pause velocity movement and re-center it at the current hand."""
+
+        self.pointer_center_x = hand_x
+        self.pointer_center_y = hand_y
+        self.pointer_last_ms = now
+
+
+    def velocity_pointer_point(self, hand_x, hand_y, now):
+        """Convert filtered hand deflection into an unbounded cursor velocity."""
+
+        if self.pointer_float_x is None:
+
+            self.pointer_float_x = float(hand_x)
+            self.pointer_float_y = float(hand_y)
+
+            self.hold_pointer_control(hand_x, hand_y, now)
+
+            return hand_x, hand_y
+
+
+        dt_ms = time.ticks_diff(now, self.pointer_last_ms)
+
+        if dt_ms < 0:
+            dt_ms = 0
+        elif dt_ms > POINTER_MAX_DT_MS:
+            dt_ms = POINTER_MAX_DT_MS
+
+
+        offset_x = hand_x - self.pointer_center_x
+        offset_y = hand_y - self.pointer_center_y
+
+        # The hand tracker already supplies an adaptive EMA.  This small
+        # neutral dead zone removes its last sub-pixel/int rounding movement
+        # without affecting deliberate, larger deflection.
+        if abs(offset_x) <= POINTER_DEAD_ZONE:
+            offset_x = 0
+        if abs(offset_y) <= POINTER_DEAD_ZONE:
+            offset_y = 0
+
+        scale = POINTER_VELOCITY_GAIN * (dt_ms / 1000.0)
+
+        self.pointer_float_x += offset_x * scale
+        self.pointer_float_y += offset_y * scale
+
+        # Keep the internal coordinate aligned with MouseController's screen
+        # coordinate range.  Without this, movement past an OS screen edge
+        # would build up invisible distance before a reverse movement reacts.
+        if self.pointer_width is not None:
+            if self.pointer_float_x < 0:
+                self.pointer_float_x = 0.0
+            elif self.pointer_float_x > self.pointer_width:
+                self.pointer_float_x = self.pointer_width
+
+            if self.pointer_float_y < 0:
+                self.pointer_float_y = 0.0
+            elif self.pointer_float_y > self.pointer_height:
+                self.pointer_float_y = self.pointer_height
+
+        self.pointer_last_ms = now
+
+        return (
+            int(self.pointer_float_x),
+            int(self.pointer_float_y)
+        )
+
+
+    def drag_relative_point(self, palm_x, palm_y):
+        """Return a noise-resistant palm-relative drag position."""
+
+        self.drag_filtered_palm_x = (
+            self.drag_filtered_palm_x * (1.0 - DRAG_PALM_ALPHA)
+            + palm_x * DRAG_PALM_ALPHA
+        )
+
+        self.drag_filtered_palm_y = (
+            self.drag_filtered_palm_y * (1.0 - DRAG_PALM_ALPHA)
+            + palm_y * DRAG_PALM_ALPHA
+        )
+
+        delta_x = self.drag_filtered_palm_x - self.drag_start_palm_x
+        delta_y = self.drag_filtered_palm_y - self.drag_start_palm_y
+
+        if abs(delta_x) <= DRAG_DEAD_ZONE:
+            delta_x = 0
+        if abs(delta_y) <= DRAG_DEAD_ZONE:
+            delta_y = 0
+
+        return (
+            int(self.drag_start_cursor_x + delta_x),
+            int(self.drag_start_cursor_y + delta_y)
+        )
+
+
     def result(self, action, x, y, pinch_ratio, fist, click_ready):
 
         self.cursor_x = int(x)
@@ -310,6 +440,8 @@ class GestureController:
         self.drag_start_palm_y = None
         self.drag_start_cursor_x = None
         self.drag_start_cursor_y = None
+        self.drag_filtered_palm_x = None
+        self.drag_filtered_palm_y = None
 
 
     # ========================================================
@@ -388,6 +520,12 @@ class GestureController:
 
         self.cursor_x = None
         self.cursor_y = None
+
+        self.pointer_float_x = None
+        self.pointer_float_y = None
+        self.pointer_center_x = None
+        self.pointer_center_y = None
+        self.pointer_last_ms = None
 
         self.clear_cursor_locks()
 
@@ -475,7 +613,7 @@ class GestureController:
         # 포인터
         # ----------------------------------------------------
 
-        move_x, move_y = self.smooth_point(
+        hand_x, hand_y = self.smooth_point(
             index_x,
             index_y
         )
@@ -536,6 +674,9 @@ class GestureController:
 
         if fist_now:
 
+            # A FIST candidate must not continue the regular velocity cursor.
+            self.hold_pointer_control(hand_x, hand_y, now)
+
             # release 후보 취소
             self.fist_release_since = None
 
@@ -544,14 +685,9 @@ class GestureController:
 
                 self.action = "DRAG"
 
-                drag_x = (
-                    self.drag_start_cursor_x
-                    + (palm_x - self.drag_start_palm_x)
-                )
-
-                drag_y = (
-                    self.drag_start_cursor_y
-                    + (palm_y - self.drag_start_palm_y)
+                drag_x, drag_y = self.drag_relative_point(
+                    palm_x,
+                    palm_y
                 )
 
                 return self.result(
@@ -571,8 +707,8 @@ class GestureController:
 
                 self.fist_anchor_x, self.fist_anchor_y = (
                     self.cursor_or_point(
-                        move_x,
-                        move_y
+                        hand_x,
+                        hand_y
                     )
                 )
 
@@ -599,6 +735,8 @@ class GestureController:
                 self.drag_start_palm_y = palm_y
                 self.drag_start_cursor_x = self.fist_anchor_x
                 self.drag_start_cursor_y = self.fist_anchor_y
+                self.drag_filtered_palm_x = float(palm_x)
+                self.drag_filtered_palm_y = float(palm_y)
 
 
             else:
@@ -648,14 +786,9 @@ class GestureController:
 
                 self.action = "DRAG"
 
-                drag_x = (
-                    self.drag_start_cursor_x
-                    + (palm_x - self.drag_start_palm_x)
-                )
-
-                drag_y = (
-                    self.drag_start_cursor_y
-                    + (palm_y - self.drag_start_palm_y)
+                drag_x, drag_y = self.drag_relative_point(
+                    palm_x,
+                    palm_y
                 )
 
                 return self.result(
@@ -743,8 +876,8 @@ class GestureController:
 
                     self.click_anchor_x, self.click_anchor_y = (
                         self.cursor_or_point(
-                            move_x,
-                            move_y
+                            hand_x,
+                            hand_y
                         )
                     )
 
@@ -813,13 +946,19 @@ class GestureController:
             )
         ):
 
+            # Keep the velocity control neutral while the click anchor is held.
+            self.hold_pointer_control(hand_x, hand_y, now)
+
             output_x = self.click_anchor_x
             output_y = self.click_anchor_y
 
         else:
 
-            output_x = move_x
-            output_y = move_y
+            output_x, output_y = self.velocity_pointer_point(
+                hand_x,
+                hand_y,
+                now
+            )
 
         return self.result(
             self.action,

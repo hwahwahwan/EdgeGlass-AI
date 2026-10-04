@@ -58,7 +58,7 @@ if __name__ == "__main__":
 
 
     gesture_controller = (
-        GestureController()
+        GestureController(rgb888p_size)
     )
 
     # Transport only: GestureController remains the sole owner of AI,
