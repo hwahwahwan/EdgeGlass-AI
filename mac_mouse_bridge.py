@@ -10,6 +10,7 @@ import glob
 import sys
 
 PREFIX = "@MOUSE|"
+DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
 
 
 def available_ports():
@@ -151,7 +152,11 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", help="Explicit /dev/cu.* device to read; never auto-selected.")
+    parser.add_argument(
+        "--port",
+        default=DEFAULT_UART2_PORT,
+        help="Verified K230 UART2 port (default: %(default)s)."
+    )
     parser.add_argument("--baud", type=int, default=115200, help="CDC line setting (default: 115200).")
     parser.add_argument("--list", action="store_true", help="List candidate USB serial devices and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Parse serial input without sending OS events.")
@@ -170,9 +175,6 @@ def main():
     if args.self_test:
         self_test()
         return 0
-    if not args.port:
-        parser.error("--port is required unless --list or --self-test is used")
-
     try:
         import serial
     except ImportError:

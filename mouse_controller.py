@@ -1,10 +1,6 @@
-"""K230-side transport for already-decided Smart Glass mouse actions.
+"""K230-side UART2 transport for already-decided Smart Glass mouse actions."""
 
-This module deliberately contains no hand, gesture, or smoothing logic.  It
-only serializes the result produced by ``GestureController`` onto CanMV's
-existing USB CDC/REPL stdout stream.  The Mac bridge filters ``@MOUSE|`` lines
-from ordinary CanMV debug output.
-"""
+from machine import UART
 
 
 class MouseController:
@@ -17,6 +13,16 @@ class MouseController:
         self.invert_y = invert_y
         self.previous_action = "STOP"
         self.dragging = False
+        # BPI-CanMV-K230D-Zero UART2 is physically connected to the verified
+        # CH342K USB Dual_Serial data port (macOS: cu.usbmodem58930597043).
+        # This leaves the CanMV USB CDC/IDE channel untouched.
+        self.uart = UART(
+            UART.UART2,
+            baudrate=115200,
+            bits=UART.EIGHTBITS,
+            parity=UART.PARITY_NONE,
+            stop=UART.STOPBITS_ONE
+        )
 
     def _normalized_point(self, x, y):
         """Clamp an existing K230 pointer position to the 0.0..1.0 protocol."""
@@ -45,9 +51,10 @@ class MouseController:
 
     def _send(self, action, point=None):
         if point is None:
-            print("@MOUSE|" + action)
+            message = "@MOUSE|" + action
         else:
-            print("@MOUSE|%s|%.4f|%.4f" % (action, point[0], point[1]))
+            message = "@MOUSE|%s|%.4f|%.4f" % (action, point[0], point[1])
+        self.uart.write(message + "\r\n")
 
     def update(self, action, x=None, y=None):
         """Send transport events for one already-computed controller result.
@@ -97,3 +104,4 @@ class MouseController:
         if self.previous_action != "STOP":
             self._send("STOP")
         self.previous_action = "STOP"
+        self.uart.deinit()

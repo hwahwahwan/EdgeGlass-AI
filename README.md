@@ -38,17 +38,17 @@ source .venv/bin/activate
 python mac_mouse_bridge.py --list
 ```
 
-표시된 `/dev/cu.usbmodem*` 포트 중 실제 CanMV 출력이 나오는 포트를 선택합니다.
-포트 번호는 Mac과 USB 연결 상태마다 달라질 수 있으므로 하드코딩하지 말고 항상
-`--list`로 확인한 뒤 사용하세요. VS Code CanMV extension이 같은 endpoint를 열고
-있으면 bridge가 접근할 수 없으므로, 해당 포트에서는 IDE 연결을 끊어야 합니다.
+CanMV IDE/Preview는 `/dev/cu.usbmodem0010000001`을 사용합니다. Mouse bridge는
+실측된 K230 UART2 경로인 `/dev/cu.usbmodem58930597043`을 사용하므로, 두 프로그램을
+동시에 실행할 수 있습니다. `--list`는 USB 장치 연결 상태를 확인할 때 사용할 수
+있습니다.
 
 ### Mac mouse bridge 실행
 
 예를 들어 확인한 포트가 아래와 같다면 다음을 실행합니다.
 
 ```bash
-python mac_mouse_bridge.py --port /dev/cu.usbmodem00100000001
+python mac_mouse_bridge.py --port /dev/cu.usbmodem58930597043
 ```
 
 K230에서는 기존처럼 `main.py`를 실행합니다. K230의 `main.py`는 AI·제스처·UI와
