@@ -181,6 +181,29 @@ class GestureController:
         self.last_raw_y = None
 
 
+        # ----------------------------------------------------
+        # Cursor anchors
+        #
+        # Gesture recognition still uses the original keypoints and timings.
+        # These values only decide which already-computed coordinate is sent
+        # while a pinch/fist transition is in progress.
+        # ----------------------------------------------------
+
+        self.cursor_x = None
+        self.cursor_y = None
+
+        self.click_anchor_x = None
+        self.click_anchor_y = None
+
+        self.fist_anchor_x = None
+        self.fist_anchor_y = None
+
+        self.drag_start_palm_x = None
+        self.drag_start_palm_y = None
+        self.drag_start_cursor_x = None
+        self.drag_start_cursor_y = None
+
+
     # ========================================================
     # 검지 포인터 smoothing
     #
@@ -250,6 +273,43 @@ class GestureController:
             int(self.smooth_x),
             int(self.smooth_y)
         )
+
+
+    def cursor_or_point(self, x, y):
+
+        if self.cursor_x is None:
+            return x, y
+
+        return self.cursor_x, self.cursor_y
+
+
+    def result(self, action, x, y, pinch_ratio, fist, click_ready):
+
+        self.cursor_x = int(x)
+        self.cursor_y = int(y)
+
+        return {
+            "action": action,
+            "x": self.cursor_x,
+            "y": self.cursor_y,
+            "pinch_ratio": pinch_ratio,
+            "fist": fist,
+            "click_ready": click_ready
+        }
+
+
+    def clear_cursor_locks(self):
+
+        self.click_anchor_x = None
+        self.click_anchor_y = None
+
+        self.fist_anchor_x = None
+        self.fist_anchor_y = None
+
+        self.drag_start_palm_x = None
+        self.drag_start_palm_y = None
+        self.drag_start_cursor_x = None
+        self.drag_start_cursor_y = None
 
 
     # ========================================================
@@ -326,6 +386,11 @@ class GestureController:
         self.last_raw_x = None
         self.last_raw_y = None
 
+        self.cursor_x = None
+        self.cursor_y = None
+
+        self.clear_cursor_locks()
+
 
         return self.action
 
@@ -390,6 +455,19 @@ class GestureController:
 
         pinky_mcp_y = int(
             points[17 * 2 + 1]
+        )
+
+
+        # Wrist and MCP joints remain comparatively stable while making a
+        # fist. They are used only for relative movement after DRAG starts.
+        palm_x = int(
+            (wrist_x + index_mcp_x + middle_mcp_x + pinky_mcp_x)
+            / 4
+        )
+
+        palm_y = int(
+            (wrist_y + index_mcp_y + middle_mcp_y + pinky_mcp_y)
+            / 4
         )
 
 
@@ -466,23 +544,37 @@ class GestureController:
 
                 self.action = "DRAG"
 
+                drag_x = (
+                    self.drag_start_cursor_x
+                    + (palm_x - self.drag_start_palm_x)
+                )
 
-                return {
-                    "action": self.action,
-                    "x": move_x,
-                    "y": move_y,
+                drag_y = (
+                    self.drag_start_cursor_y
+                    + (palm_y - self.drag_start_palm_y)
+                )
 
-                    "pinch_ratio": pinch_ratio,
-
-                    "fist": True,
-                    "click_ready": False
-                }
+                return self.result(
+                    self.action,
+                    drag_x,
+                    drag_y,
+                    pinch_ratio,
+                    True,
+                    False
+                )
 
 
             # 처음 주먹이 보임
             if self.fist_since is None:
 
                 self.fist_since = now
+
+                self.fist_anchor_x, self.fist_anchor_y = (
+                    self.cursor_or_point(
+                        move_x,
+                        move_y
+                    )
+                )
 
 
             fist_ms = time.ticks_diff(
@@ -503,6 +595,11 @@ class GestureController:
 
                 self.action = "DRAG"
 
+                self.drag_start_palm_x = palm_x
+                self.drag_start_palm_y = palm_y
+                self.drag_start_cursor_x = self.fist_anchor_x
+                self.drag_start_cursor_y = self.fist_anchor_y
+
 
             else:
 
@@ -510,16 +607,14 @@ class GestureController:
                 self.action = "MOVE"
 
 
-            return {
-                "action": self.action,
-                "x": move_x,
-                "y": move_y,
-
-                "pinch_ratio": pinch_ratio,
-
-                "fist": True,
-                "click_ready": False
-            }
+            return self.result(
+                self.action,
+                self.fist_anchor_x,
+                self.fist_anchor_y,
+                pinch_ratio,
+                True,
+                False
+            )
 
 
         # ====================================================
@@ -553,17 +648,24 @@ class GestureController:
 
                 self.action = "DRAG"
 
+                drag_x = (
+                    self.drag_start_cursor_x
+                    + (palm_x - self.drag_start_palm_x)
+                )
 
-                return {
-                    "action": self.action,
-                    "x": move_x,
-                    "y": move_y,
+                drag_y = (
+                    self.drag_start_cursor_y
+                    + (palm_y - self.drag_start_palm_y)
+                )
 
-                    "pinch_ratio": pinch_ratio,
-
-                    "fist": False,
-                    "click_ready": False
-                }
+                return self.result(
+                    self.action,
+                    drag_x,
+                    drag_y,
+                    pinch_ratio,
+                    False,
+                    False
+                )
 
 
             # -----------------------------------------------
@@ -579,6 +681,8 @@ class GestureController:
 
             self.pinch_since = None
             self.open_since = now
+
+            self.clear_cursor_locks()
 
             self.action = "MOVE"
 
@@ -611,6 +715,8 @@ class GestureController:
 
                     self.open_since = None
                     self.pinch_since = None
+                    self.click_anchor_x = None
+                    self.click_anchor_y = None
 
 
             else:
@@ -635,6 +741,13 @@ class GestureController:
 
                     self.pinch_since = now
 
+                    self.click_anchor_x, self.click_anchor_y = (
+                        self.cursor_or_point(
+                            move_x,
+                            move_y
+                        )
+                    )
+
 
                 pinch_ms = time.ticks_diff(
                     now,
@@ -655,21 +768,21 @@ class GestureController:
                     self.open_since = None
 
 
-                    return {
-                        "action": self.action,
-                        "x": move_x,
-                        "y": move_y,
-
-                        "pinch_ratio": pinch_ratio,
-
-                        "fist": False,
-                        "click_ready": False
-                    }
+                    return self.result(
+                        self.action,
+                        self.click_anchor_x,
+                        self.click_anchor_y,
+                        pinch_ratio,
+                        False,
+                        False
+                    )
 
 
             else:
 
                 self.pinch_since = None
+                self.click_anchor_x = None
+                self.click_anchor_y = None
 
 
         # ====================================================
@@ -691,17 +804,28 @@ class GestureController:
             self.action = "MOVE"
 
 
-        return {
-            "action": self.action,
+        if (
+            self.pinch_since is not None
+            or
+            (
+                self.click_anchor_x is not None
+                and not self.click_armed
+            )
+        ):
 
-            "x": move_x,
-            "y": move_y,
+            output_x = self.click_anchor_x
+            output_y = self.click_anchor_y
 
-            "pinch_ratio": pinch_ratio,
+        else:
 
-            "fist": False,
+            output_x = move_x
+            output_y = move_y
 
-            "click_ready": self.click_armed
-        }
-
-
+        return self.result(
+            self.action,
+            output_x,
+            output_y,
+            pinch_ratio,
+            False,
+            self.click_armed
+        )

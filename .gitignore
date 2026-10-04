@@ -1,0 +1,46 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter and Python temporary files
+.ipynb_checkpoints/
+*.tmp
+*.temp
+
+# macOS
+.DS_Store
+
+# VS Code: retain shareable project settings if added later, but ignore
+# user-specific CanMV/Pylance paths and VS Code workspace state.
+.vscode/settings.json
+.vscode/*.code-workspace
+.vscode/workspaceStorage/
+
+# Editor backups
+*~
+*.swp
+*.swo
