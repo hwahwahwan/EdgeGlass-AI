@@ -45,6 +45,23 @@ def tracking_sample(det, points, crop, fallback, fist_now):
     )
 
 
+def send_tracking(uart, kind, frame, sample=None, delta=None):
+    """Best-effort diagnostics on UART2, separate from @MOUSE records."""
+    try:
+        now = time.ticks_ms()
+        if kind == "L":
+            record = "@TRACK|L|%d|%d\r\n" % (now, frame)
+        else:
+            values = ",".join(str(value) for value in sample)
+            changes = "" if delta is None else ",".join(str(value) for value in delta)
+            record = "@TRACK|S|%d|%d|%s|%s\r\n" % (
+                now, frame, values, changes
+            )
+        uart.write(record)
+    except Exception:
+        pass
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -183,7 +200,6 @@ if __name__ == "__main__":
             ):
 
                 if TRACKING_DIAGNOSTICS:
-                    print("TRACK_LOST", time.ticks_ms(), frame_count)
                     tracking_previous = None
 
                 action = (
@@ -193,6 +209,9 @@ if __name__ == "__main__":
                 mouse_controller.update(
                     action
                 )
+
+                if TRACKING_DIAGNOSTICS:
+                    send_tracking(mouse_controller.uart, "L", frame_count)
 
 
                 pl.osd_img.draw_string_advanced(
@@ -247,9 +266,6 @@ if __name__ == "__main__":
                             sample[i] - tracking_previous[i]
                             for i in range(len(sample) - 2)
                         )
-                    print("TRACK", time.ticks_ms(), frame_count,
-                          "bbox_cx_cy_wh_roi_cx_cy_side_wrist_palm_tip_norm_wrist_tip_fallback_fist=",
-                          sample, "delta=", delta)
                     tracking_previous = sample
 
 
@@ -274,6 +290,10 @@ if __name__ == "__main__":
                     info["x"],
                     info["y"]
                 )
+
+                if TRACKING_DIAGNOSTICS:
+                    send_tracking(mouse_controller.uart, "S", frame_count,
+                                  sample, delta)
 
 
                 # ---------------------------------------------

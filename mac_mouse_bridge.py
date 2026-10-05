@@ -6,12 +6,87 @@ Install only on the Mac that runs this file:
 """
 
 import argparse
+import csv
+from datetime import datetime
 import glob
+import os
 import sys
 import time
 
 PREFIX = "@MOUSE|"
+TRACK_PREFIX = "@TRACK|"
 DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
+
+TRACK_FIELDS = (
+    "bbox_cx", "bbox_cy", "bbox_w", "bbox_h",
+    "roi_cx", "roi_cy", "roi_side",
+    "wrist_x", "wrist_y", "palm_x", "palm_y",
+    "index_tip_x", "index_tip_y",
+    "norm_wrist_x", "norm_wrist_y", "norm_index_tip_x", "norm_index_tip_y",
+    "fallback", "fist",
+)
+
+
+def parse_tracking(line):
+    """Parse a diagnostic record without treating it as a mouse action."""
+    fields = line.strip().split("|")
+    if len(fields) == 4 and fields[:2] == ["@TRACK", "L"]:
+        return "L", fields[2], fields[3], (), ()
+    if len(fields) != 6 or fields[:2] != ["@TRACK", "S"]:
+        return None
+    sample = fields[4].split(",")
+    delta = () if not fields[5] else fields[5].split(",")
+    if len(sample) != len(TRACK_FIELDS) or len(delta) not in (0, len(TRACK_FIELDS) - 2):
+        return None
+    return "S", fields[2], fields[3], sample, delta
+
+
+class TrackingCsvLogger:
+    """Lazy, best-effort Mac-side sink for UART tracking records."""
+
+    def __init__(self, log_dir=None):
+        self.log_dir = log_dir or os.path.join(os.path.dirname(__file__), "logs")
+        self.file = None
+        self.writer = None
+        self.disabled = False
+        self.path = None
+
+    def write(self, record):
+        if record is None or self.disabled:
+            return
+        try:
+            if self.file is None:
+                os.makedirs(self.log_dir, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.path = os.path.join(self.log_dir, "tracking_%s.csv" % stamp)
+                needs_header = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
+                self.file = open(self.path, "a", newline="")
+                self.writer = csv.writer(self.file)
+                if needs_header:
+                    self.writer.writerow(
+                        ["received_at", "kind", "board_ms", "frame"]
+                        + list(TRACK_FIELDS)
+                        + ["d_" + name for name in TRACK_FIELDS[:-2]]
+                    )
+            kind, board_ms, frame, sample, delta = record
+            self.writer.writerow(
+                [datetime.now().isoformat(timespec="milliseconds"), kind, board_ms, frame]
+                + list(sample) + [""] * (len(TRACK_FIELDS) - len(sample))
+                + list(delta) + [""] * (len(TRACK_FIELDS) - 2 - len(delta))
+            )
+            self.file.flush()
+        except OSError as exc:
+            self.disabled = True
+            print("Tracking CSV disabled: %s" % exc, file=sys.stderr)
+            self.close()
+
+    def close(self):
+        if self.file is not None:
+            try:
+                self.file.close()
+            except OSError:
+                pass
+            self.file = None
 
 
 def available_ports():
@@ -176,6 +251,7 @@ def main():
     if args.self_test:
         self_test()
         return 0
+    tracking_logger = TrackingCsvLogger()
     try:
         import serial
     except ImportError:
@@ -192,7 +268,11 @@ def main():
                 raw = connection.readline()
                 if not raw:
                     continue
-                message = parse_message(raw.decode("utf-8", errors="replace"))
+                line = raw.decode("utf-8", errors="replace")
+                if line.startswith(TRACK_PREFIX):
+                    tracking_logger.write(parse_tracking(line))
+                    continue
+                message = parse_message(line)
                 if message is not None:
                     if message[0] == "CLICK":
                         print("CLICK_RX", "time=", time.time(), "packet=@MOUSE|CLICK", flush=True)
@@ -204,6 +284,7 @@ def main():
         print("If the port is busy, disconnect VS Code CanMV from that same CDC endpoint before retrying.", file=sys.stderr)
         return 1
     finally:
+        tracking_logger.close()
         # The local is intentionally checked because creation/open may fail.
         if "mouse" in locals():
             mouse.up()

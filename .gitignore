@@ -44,3 +44,6 @@ pip-wheel-metadata/
 *~
 *.swp
 *.swo
+
+# Local board tracking captures
+logs/tracking_*.csv

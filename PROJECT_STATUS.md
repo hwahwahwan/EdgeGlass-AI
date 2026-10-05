@@ -68,3 +68,9 @@
 - `CLICK_DECISION`(K230 gesture: timestamp, pinch ratio/candidate/confirm, armed/lock/rearm, FIST candidate/drag/hand), `CLICK_TX`(K230 실제 UART write), `CLICK_RX`(Mac bridge에서 유효한 CLICK packet 수신) 로그를 추가했다. bridge 파서는 정확한 `@MOUSE|CLICK` 한 줄만 CLICK으로 처리하고, transport는 CLICK action 진입 때만 전송한다. 동일 CLICK packet의 bridge 자체 중복 dispatch 경로는 정적 검사에서 발견되지 않았다. 로그 타임베이스는 보드 ticks_ms와 Mac epoch seconds로 다르므로 순서와 건수로 비교한다.
 - 로컬 검증: `python3 -m unittest discover -s tests -v` 15개 통과, `python3 -m compileall -q` 및 `git diff --check` 통과. 새 테스트는 Preview 좌표 분리, FIST/손 유실 pinch 후보 취소, CLICK edge에서 UART 한 packet 전송과 bridge strict parse를 검사한다. 보드에서 실제 OPEN/FIST 로그와 CLICK_DECISION/TX/RX의 건수를 아직 수집하지 않았다.
 - 다음 단계: 현재 로컬 변경 파일을 보드에 임의 업로드하지 않는다. 보드 측정값 수집 후 FIST 전체 흔들림의 최초 발생 계층과 ghost click의 실제 발생 위치를 판정한다. 문서 위쪽의 과거 "다음 UI 수정" 및 "승인 전" 서술은 이 날짜의 로컬 작업 이전 상태를 기록한 것이다.
+
+## 2026-10-06 진단 저장 경로 변경 (로컬 전용, 보드 미업로드)
+
+- `TRACKING_DIAGNOSTICS=False` 기본값은 유지했다. 켰을 때의 bbox/ROI/wrist/palm/index tip/정규화 좌표/fallback/FIST와 직전 프레임 차이 및 손 유실 기록은 그대로 둔다. 콘솔 `TRACK`/`TRACK_LOST` 출력 대신 기존 UART2로 `@TRACK|S`/`@TRACK|L` 레코드를 전송한다. 마우스 action 전송을 먼저 수행하며 진단 write 예외는 무시한다. `@MOUSE` 프로토콜과 제스처·추적 로직은 변경하지 않았다.
+- Mac `mac_mouse_bridge.py`는 진단 레코드만 별도로 처리하고 최초 수신 시 프로젝트 `logs/tracking_YYYYMMDD_HHMMSS.csv`를 생성한다. 수신 시각, 보드 ticks_ms/frame, 기존 sample 19항목 및 차이 17항목을 CSV 컬럼에 저장한다. 손 유실은 `kind=L` 행으로 남긴다. 파일 열기/쓰기 오류가 나면 진단 저장만 비활성화하고 마우스 루프는 계속한다. 같은 초 이름의 파일이 있으면 append하며 헤더를 중복 기록하지 않는다. 생성된 tracking CSV는 `.gitignore` 대상이다.
+- 로컬 `unittest` 17개, `compileall`, `git diff --check` 통과. 진단/마우스 메시지 분리, CSV 내용, 파일 실패 시 마우스 파서 유지 테스트를 추가했다. 실제 UART 대역폭과 보드/Mac 통합 동작은 보드에 업로드하지 않아 미검증이다.
