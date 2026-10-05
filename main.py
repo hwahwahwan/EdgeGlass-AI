@@ -8,7 +8,7 @@ import gc
 # default sys.path includes /sdcard, but not its child project directories.
 PROJECT_DIR = "/sdcard/smart_glass"
 if PROJECT_DIR not in sys.path:
-    sys.path.append(PROJECT_DIR)
+    sys.path.insert(0, PROJECT_DIR)
 
 from hand_tracker import HandTracker
 from gesture_controller import GestureController, is_fist
