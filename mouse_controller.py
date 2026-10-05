@@ -1,6 +1,7 @@
 """K230-side UART2 transport for already-decided Smart Glass mouse actions."""
 
 from machine import UART
+import time
 
 
 class MouseController:
@@ -55,6 +56,8 @@ class MouseController:
         else:
             message = "@MOUSE|%s|%.4f|%.4f" % (action, point[0], point[1])
         self.uart.write(message + "\r\n")
+        if action == "CLICK":
+            print("CLICK_TX", "ms=", time.ticks_ms(), "packet=", message)
 
     def update(self, action, x=None, y=None):
         """Send transport events for one already-computed controller result.

@@ -3,6 +3,7 @@ from media.media import *
 
 import sys
 import gc
+import time
 
 # This project is stored as a directory on the persistent SD card.  CanMV's
 # default sys.path includes /sdcard, but not its child project directories.
@@ -14,6 +15,34 @@ from hand_tracker import HandTracker
 from gesture_controller import GestureController, is_fist
 from mouse_controller import MouseController
 from ui import draw_hand
+
+
+# Enable only while collecting OPEN/FIST tracking measurements on the board.
+TRACKING_DIAGNOSTICS = False
+
+
+def tracking_sample(det, points, crop, fallback, fist_now):
+    """Read existing detector/ROI/keypoint results without changing them."""
+    crop_x, crop_y, side, _ = crop
+    palm_x = (int(points[0]) + int(points[10]) + int(points[18]) + int(points[34])) / 4
+    palm_y = (int(points[1]) + int(points[11]) + int(points[19]) + int(points[35])) / 4
+    return (
+        (float(det[2]) + float(det[4])) / 2,
+        (float(det[3]) + float(det[5])) / 2,
+        float(det[4]) - float(det[2]),
+        float(det[5]) - float(det[3]),
+        crop_x + side / 2,
+        crop_y + side / 2,
+        side,
+        int(points[0]), int(points[1]),
+        palm_x, palm_y,
+        int(points[16]), int(points[17]),
+        (int(points[0]) - crop_x) / side,
+        (int(points[1]) - crop_y) / side,
+        (int(points[16]) - crop_x) / side,
+        (int(points[17]) - crop_y) / side,
+        int(fallback), int(fist_now)
+    )
 
 
 # ============================================================
@@ -70,6 +99,7 @@ if __name__ == "__main__":
 
     frame_count = 0
     last_action = None
+    tracking_previous = None
 
 
     try:
@@ -152,6 +182,10 @@ if __name__ == "__main__":
                 points is None
             ):
 
+                if TRACKING_DIAGNOSTICS:
+                    print("TRACK_LOST", time.ticks_ms(), frame_count)
+                    tracking_previous = None
+
                 action = (
                     gesture_controller.no_hand()
                 )
@@ -201,6 +235,22 @@ if __name__ == "__main__":
                 fist_now = is_fist(
                     points
                 )
+
+                if TRACKING_DIAGNOSTICS:
+                    sample = tracking_sample(
+                        det, points, tracker.keypoint.crop_params,
+                        fallback, fist_now
+                    )
+                    delta = None
+                    if tracking_previous is not None:
+                        delta = tuple(
+                            sample[i] - tracking_previous[i]
+                            for i in range(len(sample) - 2)
+                        )
+                    print("TRACK", time.ticks_ms(), frame_count,
+                          "bbox_cx_cy_wh_roi_cx_cy_side_wrist_palm_tip_norm_wrist_tip_fallback_fist=",
+                          sample, "delta=", delta)
+                    tracking_previous = sample
 
 
                 # ---------------------------------------------

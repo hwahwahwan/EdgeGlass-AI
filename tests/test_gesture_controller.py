@@ -177,6 +177,27 @@ class GestureControllerTests(unittest.TestCase):
         self.assertEqual(drag_start["action"], "DRAG")
         self.assertEqual((drag_start["x"], drag_start["y"]), (fist_anchor["x"], fist_anchor["y"]))
 
+    def test_short_fist_candidate_cancels_old_pinch_timer(self):
+        self.frame(200, 150, 0)
+        self.frame(200, 150, 120)
+        self.frame(200, 150, 140, pinch=True)
+        self.frame(200, 150, 160, pinch=True, fist=True)
+        self.assertIsNone(self.controller.pinch_since)
+        released = self.frame(200, 150, 240, pinch=True)
+        self.assertNotEqual(released["action"], "CLICK")
+        self.assertEqual(self.controller.pinch_since, 240)
+
+    def test_short_hand_loss_cancels_old_pinch_timer(self):
+        self.frame(200, 150, 0)
+        self.frame(200, 150, 120)
+        self.frame(200, 150, 140, pinch=True)
+        self.clock.now = 160
+        self.controller.no_hand()
+        self.assertIsNone(self.controller.pinch_since)
+        reacquired = self.frame(200, 150, 240, pinch=True)
+        self.assertNotEqual(reacquired["action"], "CLICK")
+        self.assertEqual(self.controller.pinch_since, 240)
+
 
 if __name__ == "__main__":
     unittest.main()

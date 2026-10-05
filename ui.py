@@ -227,13 +227,13 @@ def draw_hand(
 
 
     # --------------------------------------------------------
-    # smoothing된 검지 포인터
+    # 실제 검지 끝 landmark 8 (mouse cursor 좌표와 별개)
     # --------------------------------------------------------
 
     pointer_x, pointer_y = (
         point_to_display(
-            info["x"],
-            info["y"],
+            points[16],
+            points[17],
 
             rgb888p_size,
             display_size
@@ -256,5 +256,4 @@ def draw_hand(
 
         fill=True
     )
-
 

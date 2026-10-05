@@ -8,6 +8,7 @@ Install only on the Mac that runs this file:
 import argparse
 import glob
 import sys
+import time
 
 PREFIX = "@MOUSE|"
 DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
@@ -193,6 +194,8 @@ def main():
                     continue
                 message = parse_message(raw.decode("utf-8", errors="replace"))
                 if message is not None:
+                    if message[0] == "CLICK":
+                        print("CLICK_RX", "time=", time.time(), "packet=@MOUSE|CLICK", flush=True)
                     dispatch(mouse, message)
     except KeyboardInterrupt:
         print("Stopping bridge.")

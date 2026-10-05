@@ -58,3 +58,13 @@
 - 원본 `/Users/yonghwan/Desktop/Smart_Glass/smart_glass.py`는 수정하지 않는다.
 - 기존 사용자 변경을 덮어쓰지 않는다. AI/gesture 수치나 상태 머신을 증상 완화를 위해 임의 변경하지 않는다.
 - 다음 세션 시작 시 이 문서를 먼저 읽고, 실제 코드 및 `git status`/`git diff`와 대조한다. 의미 있는 변경·테스트·문제 발견 시 갱신하고 오래된 세부 기록은 정리한다.
+
+## 2026-10-06 로컬 조사 및 수정 (보드 미업로드)
+
+- 사용자가 실제 보드에서 Preview 빨간 점 이탈, FIST/DRAG 때 빨간 점과 21개 skeleton 전체의 심한 흔들림, 간헐적인 의도치 않은 CLICK을 보고했다. 이번 작업은 로컬만 변경했으며 보드 파일과 실제 보드 원인은 아직 확인하지 않았다.
+- 원본 `/Users/yonghwan/Desktop/Smart_Glass/smart_glass.py`와 현재 `hand_tracker.py`의 `HandDetection`, `HandKeypoint`, `HandTracker` 클래스는 AST 기준 동일하다. `ui.py`도 최근 Git 이력에서 바뀌지 않았다. 원본 UI의 `info["x/y"]`는 당시 평활화된 검지 tip이었으나 현재는 누적 마우스 좌표이므로 빨간 점이 skeleton에서 떨어진다. 검지 tip은 landmark 8=`points[16]/[17]`, 엄지 tip은 landmark 4=`points[8]/[9]`. UI 빨간 점만 raw 검지 tip으로 연결하고 MOVE 계산과 UART 좌표는 유지했다.
+- FIST skeleton 전체의 흔들림은 UI나 `gesture_controller`의 커서 필터가 raw `points`를 변경해서 발생하는 현상이 아니다. 정확히 bbox, square ROI, raw keypoint 중 어디서 시작되는지는 OPEN/FIST 보드 프레임 데이터가 없어 미확정. `main.py`에 기본 꺼짐인 `TRACKING_DIAGNOSTICS`를 두고 켜면 timestamp/frame, bbox center·w/h, ROI center·side, wrist/palm/index tip, ROI 정규화 wrist/tip, fallback/FIST 및 직전 프레임 차이를 `TRACK`으로 기록한다. 손 유실은 `TRACK_LOST`로 남긴다. 보드에서 OPEN/FIST 구간을 각각 수집해 공통 이동, ROI scale 및 fallback을 비교해야 한다. 현재 `hand_tracker.py`의 AI/crop/fallback 로직은 수정하지 않았다.
+- 기존 상태 머신에는 CLICK pinch 후보가 짧은 FIST 후보 및 350ms 이내 손 유실 중 살아남는 경로가 있었다. 이 시간 경과 후 pinch로 재판정되면 90ms 연속 관측 없이 CLICK 확정이 가능하다. 로컬 재현 테스트로 확인했고, FIST 후보 시작 및 `no_hand()` 호출 시 pinch 후보 시간과 CLICK anchor만 취소한다. FIST/DRAG 판정, 임계값, MOVE 필터와 정상 CLICK anchor는 유지했다. 이것이 보드의 ghost click 실제 원인인지는 로그 대조 전까지 미확정이다.
+- `CLICK_DECISION`(K230 gesture: timestamp, pinch ratio/candidate/confirm, armed/lock/rearm, FIST candidate/drag/hand), `CLICK_TX`(K230 실제 UART write), `CLICK_RX`(Mac bridge에서 유효한 CLICK packet 수신) 로그를 추가했다. bridge 파서는 정확한 `@MOUSE|CLICK` 한 줄만 CLICK으로 처리하고, transport는 CLICK action 진입 때만 전송한다. 동일 CLICK packet의 bridge 자체 중복 dispatch 경로는 정적 검사에서 발견되지 않았다. 로그 타임베이스는 보드 ticks_ms와 Mac epoch seconds로 다르므로 순서와 건수로 비교한다.
+- 로컬 검증: `python3 -m unittest discover -s tests -v` 15개 통과, `python3 -m compileall -q` 및 `git diff --check` 통과. 새 테스트는 Preview 좌표 분리, FIST/손 유실 pinch 후보 취소, CLICK edge에서 UART 한 packet 전송과 bridge strict parse를 검사한다. 보드에서 실제 OPEN/FIST 로그와 CLICK_DECISION/TX/RX의 건수를 아직 수집하지 않았다.
+- 다음 단계: 현재 로컬 변경 파일을 보드에 임의 업로드하지 않는다. 보드 측정값 수집 후 FIST 전체 흔들림의 최초 발생 계층과 ghost click의 실제 발생 위치를 판정한다. 문서 위쪽의 과거 "다음 UI 수정" 및 "승인 전" 서술은 이 날짜의 로컬 작업 이전 상태를 기록한 것이다.

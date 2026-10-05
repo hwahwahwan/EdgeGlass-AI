@@ -499,6 +499,13 @@ class GestureController:
 
         now = time.ticks_ms()
 
+        # A pinch must be continuous across detected frames. A brief detector
+        # miss still keeps MOVE/DRAG grace, but cannot advance CLICK timing.
+        if self.pinch_since is not None:
+            self.pinch_since = None
+            self.click_anchor_x = None
+            self.click_anchor_y = None
+
         # A missing frame must not become a large MOVE delta on reacquisition.
         self.pointer_ref_x = None
         self.pointer_ref_y = None
@@ -756,6 +763,12 @@ class GestureController:
 
                 self.fist_since = now
 
+                # An interrupted pinch cannot resume its old confirm timer
+                # after a short FIST candidate ends.
+                self.pinch_since = None
+                self.click_anchor_x = None
+                self.click_anchor_y = None
+
                 self.fist_anchor_x, self.fist_anchor_y = (
                     self.cursor_or_point(
                         hand_x,
@@ -947,6 +960,22 @@ class GestureController:
 
 
                 if pinch_ms >= self.click_confirm_ms:
+
+                    print(
+                        "CLICK_DECISION",
+                        "ms=", now,
+                        "action=CLICK",
+                        "pinch_ratio=", pinch_ratio,
+                        "pinch_since=", self.pinch_since,
+                        "pinch_confirm_ms=", pinch_ms,
+                        "click_armed=", self.click_armed,
+                        "click_locked=", self.click_anchor_x is not None,
+                        "rearm_since=", self.open_since,
+                        "fist=", fist_now,
+                        "fist_since=", self.fist_since,
+                        "drag=", self.dragging,
+                        "hand_present=True"
+                    )
 
                     # CLICK은 1회만 발생
                     self.click_time = now
