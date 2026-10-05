@@ -18,7 +18,7 @@ from ui import draw_hand
 
 
 # Enable only while collecting OPEN/FIST tracking measurements on the board.
-TRACKING_DIAGNOSTICS = False
+TRACKING_DIAGNOSTICS = True
 
 
 def tracking_sample(det, points, crop, fallback, fist_now):
