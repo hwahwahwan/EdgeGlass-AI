@@ -5,15 +5,57 @@ import time
 # ============================================================
 # Air-mouse pointer tuning
 #
-# MOVE uses the index tip's frame-to-frame displacement. A stationary hand
-# produces no pointer movement, regardless of its position in the camera.
+# MOVE filters only the index tip, then moves relative to a stable hand
+# reference. The camera position never maps directly to a screen position.
 # ============================================================
 
 POINTER_DELTA_GAIN = 1.0
-POINTER_DEAD_ZONE = 2
+POINTER_DEAD_ZONE = 5.0
+POINTER_MIN_CUTOFF = 1.0
+POINTER_BETA = 0.05
+POINTER_D_CUTOFF = 1.0
 
 DRAG_PALM_ALPHA = 0.45
 DRAG_DEAD_ZONE = 3
+
+
+class OneEuroFilter:
+    """One-axis One Euro filter for pixel positions and millisecond ticks."""
+
+    def __init__(self):
+        self.value = None
+        self.derivative = 0.0
+        self.last_ms = None
+
+    def reset(self, value=None, now=None):
+        self.value = None if value is None else float(value)
+        self.derivative = 0.0
+        self.last_ms = now
+
+    def filter(self, value, now):
+        value = float(value)
+        if self.value is None:
+            self.reset(value, now)
+            return value
+
+        dt_ms = time.ticks_diff(now, self.last_ms)
+        if dt_ms <= 0:
+            dt_ms = 1
+        dt = dt_ms / 1000.0
+
+        derivative = (value - self.value) / dt
+        alpha_d = (2.0 * math.pi * POINTER_D_CUTOFF * dt) / (
+            1.0 + 2.0 * math.pi * POINTER_D_CUTOFF * dt
+        )
+        self.derivative += alpha_d * (derivative - self.derivative)
+
+        cutoff = POINTER_MIN_CUTOFF + POINTER_BETA * abs(self.derivative)
+        alpha = (2.0 * math.pi * cutoff * dt) / (
+            1.0 + 2.0 * math.pi * cutoff * dt
+        )
+        self.value += alpha * (value - self.value)
+        self.last_ms = now
+        return self.value
 
 
 # ============================================================
@@ -226,8 +268,10 @@ class GestureController:
 
         self.pointer_float_x = None
         self.pointer_float_y = None
-        self.pointer_center_x = None
-        self.pointer_center_y = None
+        self.pointer_ref_x = None
+        self.pointer_ref_y = None
+        self.pointer_filter_x = OneEuroFilter()
+        self.pointer_filter_y = OneEuroFilter()
 
         if pointer_size is None:
             self.pointer_width = None
@@ -316,13 +360,16 @@ class GestureController:
         return self.cursor_x, self.cursor_y
 
 
-    def hold_pointer_control(self, hand_x, hand_y):
-        """Pause MOVE and rebase its previous hand coordinate."""
+    def hold_pointer_control(self, hand_x, hand_y, now):
+        """Pause MOVE and reset its filter and spatial reference."""
 
-        self.pointer_center_x = hand_x
-        self.pointer_center_y = hand_y
-    def delta_pointer_point(self, hand_x, hand_y):
-        """Add deliberate index-tip displacement to the current pointer."""
+        self.pointer_filter_x.reset(hand_x, now)
+        self.pointer_filter_y.reset(hand_y, now)
+        self.pointer_ref_x = float(hand_x)
+        self.pointer_ref_y = float(hand_y)
+
+    def delta_pointer_point(self, hand_x, hand_y, now):
+        """Move by filtered index-tip displacement beyond a stable radius."""
 
         if self.pointer_float_x is None:
 
@@ -333,27 +380,30 @@ class GestureController:
                 self.pointer_float_x = self.pointer_width / 2.0
                 self.pointer_float_y = self.pointer_height / 2.0
 
-            self.hold_pointer_control(hand_x, hand_y)
+            self.hold_pointer_control(hand_x, hand_y, now)
 
             return int(self.pointer_float_x), int(self.pointer_float_y)
 
-        if self.pointer_center_x is None:
-            self.hold_pointer_control(hand_x, hand_y)
+        if self.pointer_ref_x is None:
+            self.hold_pointer_control(hand_x, hand_y, now)
             return int(self.pointer_float_x), int(self.pointer_float_y)
 
+        filtered_x = self.pointer_filter_x.filter(hand_x, now)
+        filtered_y = self.pointer_filter_y.filter(hand_y, now)
+        delta_x = filtered_x - self.pointer_ref_x
+        delta_y = filtered_y - self.pointer_ref_y
+        distance = math.sqrt(delta_x * delta_x + delta_y * delta_y)
 
-        delta_x = hand_x - self.pointer_center_x
-        delta_y = hand_y - self.pointer_center_y
-
-        # Keep the previous coordinate through tiny changes so deliberate
-        # slow movement can accumulate beyond the noise threshold.
-        if abs(delta_x) > POINTER_DEAD_ZONE:
-            self.pointer_float_x += delta_x * POINTER_DELTA_GAIN
-            self.pointer_center_x = hand_x
-
-        if abs(delta_y) > POINTER_DEAD_ZONE:
-            self.pointer_float_y += delta_y * POINTER_DELTA_GAIN
-            self.pointer_center_y = hand_y
+        # Leave the reference still inside the radius. Outside, follow only
+        # the excess distance, so a boundary crossing cannot jump the cursor.
+        if distance > POINTER_DEAD_ZONE:
+            fraction = (distance - POINTER_DEAD_ZONE) / distance
+            move_x = delta_x * fraction
+            move_y = delta_y * fraction
+            self.pointer_float_x += move_x * POINTER_DELTA_GAIN
+            self.pointer_float_y += move_y * POINTER_DELTA_GAIN
+            self.pointer_ref_x += move_x
+            self.pointer_ref_y += move_y
 
         # Keep the internal coordinate aligned with MouseController's screen
         # coordinate range.  Without this, movement past an OS screen edge
@@ -450,8 +500,10 @@ class GestureController:
         now = time.ticks_ms()
 
         # A missing frame must not become a large MOVE delta on reacquisition.
-        self.pointer_center_x = None
-        self.pointer_center_y = None
+        self.pointer_ref_x = None
+        self.pointer_ref_y = None
+        self.pointer_filter_x.reset()
+        self.pointer_filter_y.reset()
         self.smooth_x = None
         self.smooth_y = None
         self.last_raw_x = None
@@ -615,7 +667,7 @@ class GestureController:
         )
 
         if self.pointer_float_x is None:
-            self.delta_pointer_point(index_x, index_y)
+            self.delta_pointer_point(index_x, index_y, now)
 
 
         # ----------------------------------------------------
@@ -674,7 +726,7 @@ class GestureController:
         if fist_now:
 
             # A FIST candidate must not continue regular MOVE movement.
-            self.hold_pointer_control(index_x, index_y)
+            self.hold_pointer_control(index_x, index_y, now)
 
             # release 후보 취소
             self.fist_release_since = None
@@ -817,7 +869,7 @@ class GestureController:
             # The drag result is the last actual output coordinate.
             self.pointer_float_x = float(self.cursor_x)
             self.pointer_float_y = float(self.cursor_y)
-            self.hold_pointer_control(index_x, index_y)
+            self.hold_pointer_control(index_x, index_y, now)
 
             self.clear_cursor_locks()
 
@@ -852,9 +904,10 @@ class GestureController:
 
                     self.open_since = None
                     self.pinch_since = None
+                    if self.click_anchor_x is not None:
+                        self.hold_pointer_control(index_x, index_y, now)
                     self.click_anchor_x = None
                     self.click_anchor_y = None
-                    self.hold_pointer_control(index_x, index_y)
 
 
             else:
@@ -919,7 +972,7 @@ class GestureController:
             else:
 
                 if self.pinch_since is not None or self.click_anchor_x is not None:
-                    self.hold_pointer_control(index_x, index_y)
+                    self.hold_pointer_control(index_x, index_y, now)
                 self.pinch_since = None
                 self.click_anchor_x = None
                 self.click_anchor_y = None
@@ -954,7 +1007,7 @@ class GestureController:
         ):
 
             # Keep MOVE rebased while the click anchor is held.
-            self.hold_pointer_control(index_x, index_y)
+            self.hold_pointer_control(index_x, index_y, now)
 
             output_x = self.click_anchor_x
             output_y = self.click_anchor_y
@@ -963,7 +1016,8 @@ class GestureController:
 
             output_x, output_y = self.delta_pointer_point(
                 index_x,
-                index_y
+                index_y,
+                now
             )
 
         return self.result(
