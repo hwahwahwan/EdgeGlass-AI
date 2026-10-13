@@ -1,0 +1,8 @@
+# Local presentation script (keep on this computer only)
+/발표대본
+
+# macOS Finder metadata
+.DS_Store
+
+# Local VS Code workspace settings
+/.vscode/

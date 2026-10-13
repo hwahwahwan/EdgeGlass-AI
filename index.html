@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="EdgeGlass-AI 온디바이스 AI 스마트글래스 에어마우스 발표" />
+    <title>EdgeGlass-AI | 발표</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css" />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <section class="edgeglass-slide" data-background-color="#f7f8fc">
+          <div class="slide-shell">
+            <div class="top-rule" aria-hidden="true"></div>
+
+            <header class="slide-header">
+              <p class="eyebrow">ON-DEVICE AI PROJECT</p>
+              <h1>EdgeGlass-<span>AI</span></h1>
+              <p class="subtitle">온디바이스 AI 기반 스마트글래스 에어마우스</p>
+            </header>
+
+            <section class="purpose" aria-labelledby="purpose-heading">
+              <p class="section-label" id="purpose-heading">PROJECT GOAL</p>
+              <p class="purpose-copy">카메라로 손동작을 인식하고, 기기 내부에서 AI를 실행해<br />컴퓨터 마우스를 제어하는 스마트글래스 개발</p>
+            </section>
+
+            <section class="feature-section" aria-labelledby="feature-heading">
+              <p class="section-label" id="feature-heading">CORE INTERACTIONS</p>
+              <div class="feature-grid">
+                <article class="feature-card">
+                  <h2>MOVE</h2>
+                  <dl>
+                    <div><dt>손동작</dt><dd>검지 이동</dd></div>
+                    <div><dt>실행 결과</dt><dd>커서 이동</dd></div>
+                  </dl>
+                </article>
+                <article class="feature-card">
+                  <h2>CLICK</h2>
+                  <dl>
+                    <div><dt>손동작</dt><dd>엄지·검지 모으기</dd></div>
+                    <div><dt>실행 결과</dt><dd>마우스 클릭</dd></div>
+                  </dl>
+                </article>
+                <article class="feature-card">
+                  <h2>DRAG</h2>
+                  <dl>
+                    <div><dt>손동작</dt><dd>주먹 쥐기</dd></div>
+                    <div><dt>실행 결과</dt><dd>드래그</dd></div>
+                  </dl>
+                </article>
+                <article class="feature-card">
+                  <h2>STOP</h2>
+                  <dl>
+                    <div><dt>손동작</dt><dd>손 인식 안 됨</dd></div>
+                    <div><dt>실행 결과</dt><dd>커서 정지</dd></div>
+                  </dl>
+                </article>
+              </div>
+            </section>
+
+            <footer class="goal-footer">
+              <p class="section-label">FINAL GOAL</p>
+              <p>BLE 무선 연결 <b>·</b> 배터리 내장 <b>·</b> OLED 화면 탑재</p>
+            </footer>
+          </div>
+        </section>
+
+        <section class="system-slide" data-background-color="#f7f8fc">
+          <div class="system-shell">
+            <div class="top-rule" aria-hidden="true"></div>
+
+            <header class="system-header">
+              <p class="eyebrow">EDGEGLASS-AI · SYSTEM OVERVIEW</p>
+              <h2>하드웨어 및 AI 시스템 구성</h2>
+            </header>
+
+            <main class="system-content">
+              <div class="system-top" role="group" aria-label="핵심 하드웨어와 AI 모델">
+                <div class="system-group hardware-group" role="group" aria-labelledby="hardware-heading">
+                  <p class="section-label" id="hardware-heading">CORE HARDWARE</p>
+                  <div class="asset-list">
+                    <article class="asset-card">
+                      <div class="asset-image"><img src="assets/images/concepts/K230D-Zero.png" alt="BPI-CanMV-K230D-Zero 보드" /></div>
+                      <div><h3>BPI-CanMV-K230D-Zero</h3><p>AI 추론 및 제스처 판별</p></div>
+                    </article>
+                    <article class="asset-card">
+                      <div class="asset-image"><img src="assets/images/concepts/OV5647 카메라.png" alt="OV5647 카메라" /></div>
+                      <div><h3>OV5647 카메라</h3><p>손동작 실시간 영상 입력</p></div>
+                    </article>
+                  </div>
+                </div>
+
+                <div class="system-group model-group" role="group" aria-labelledby="model-heading">
+                  <p class="section-label" id="model-heading">AI MODELS <span>· 참고 이미지</span></p>
+                  <div class="asset-list">
+                    <article class="asset-card">
+                      <div class="asset-image"><img src="assets/images/concepts/손 검출 모델 — hand_det.kmodel.png" alt="손 검출 모델 참고 이미지" /></div>
+                      <div><h3>hand_det.kmodel</h3><p>손 위치와 영역 탐지</p></div>
+                    </article>
+                    <article class="asset-card">
+                      <div class="asset-image"><img src="assets/images/concepts/손 랜드마크 모델 — handkp_det.kmodel.png" alt="손 랜드마크 모델 참고 이미지" /></div>
+                      <div><h3>handkp_det.kmodel</h3><p>손의 21개 지점 추정</p></div>
+                    </article>
+                  </div>
+                </div>
+              </div>
+
+              <div class="processing-section" role="group" aria-labelledby="processing-heading">
+                <div class="processing-title-row">
+                  <p class="section-label" id="processing-heading">SYSTEM FLOW</p>
+                  <p>OV5647 카메라 <b>→</b> K230D-Zero <b>→</b> 노트북(Mac)</p>
+                </div>
+                <div class="processing-grid">
+                  <article class="process-card">
+                    <p class="process-index">01</p><h3>OV5647 카메라</h3><p>손동작 영상 입력</p>
+                  </article>
+                  <article class="process-card inference-card">
+                    <p class="on-device">온디바이스 AI 추론</p><p class="process-index">02</p><h3>K230D-Zero</h3><p>AI 모델 2개 실행 · 손 좌표 계산<br />제스처 판별</p>
+                  </article>
+                  <article class="process-card">
+                    <p class="process-index">03</p><h3>노트북(Mac)</h3><p>유선 명령 수신 · 마우스 실행</p>
+                  </article>
+                </div>
+              </div>
+            </main>
+          </div>
+        </section>
+
+        <section class="implementation-slide" data-background-color="#f7f8fc">
+          <div class="implementation-shell">
+            <div class="top-rule" aria-hidden="true"></div>
+
+            <header class="implementation-header">
+              <p class="eyebrow">EDGEGLASS-AI · IMPLEMENTATION</p>
+              <h2>AI 모델 선정 및 제스처 구현</h2>
+            </header>
+
+            <main class="implementation-content">
+              <div class="selection-tech-grid">
+                <article class="selection-card">
+                  <p class="section-label">MODEL SELECTION</p>
+                  <h3>호환성과 개발 기간을 함께 고려</h3>
+                  <ul>
+                    <li>하드웨어와 AI 모델의 호환성 함께 고려</li>
+                    <li>K230D-Zero용 사전 학습 모델 2개 활용</li>
+                    <li>직접 학습보다 실제 기능 구현에 집중</li>
+                  </ul>
+                </article>
+
+                <article class="technology-card">
+                  <p class="section-label">AI EXECUTION ENVIRONMENT</p>
+                  <p class="board-note">AI 모델은 K230D-Zero 내부에서 실행</p>
+                  <div class="technology-grid">
+                    <div><h3>VS Code + CanMV</h3><p>개발 및 보드 연결 환경</p></div>
+                    <div><h3>KPU</h3><p>보드 내부 AI 연산 가속</p></div>
+                    <div><h3>Ai2d</h3><p>카메라 영상 전처리</p></div>
+                  </div>
+                </article>
+              </div>
+
+              <div class="gesture-section" role="group" aria-labelledby="gesture-heading">
+                <div class="gesture-heading-row">
+                  <div>
+                    <p class="section-label" id="gesture-heading">DIRECTLY IMPLEMENTED</p>
+                    <h3>제스처 판별 및 마우스 제어 로직</h3>
+                  </div>
+                  <p class="gesture-summary">사전 학습된 AI 모델의 결과를 활용해<br />제스처 판별 및 마우스 제어 로직 직접 구현</p>
+                </div>
+
+                <div class="gesture-flow" aria-label="제스처 처리 흐름">
+                  <p>AI 모델 결과 <span>손 검출 · 손가락 위치 추정</span></p>
+                  <b>→</b>
+                  <p>직접 작성한 코드 <span>제스처 판별</span></p>
+                  <b>→</b>
+                  <p>마우스 제어 명령</p>
+                </div>
+
+                <div class="gesture-card-grid" aria-label="구현한 제스처 기능">
+                  <div>MOVE</div><div>CLICK</div><div>DRAG</div><div>STOP</div>
+                </div>
+              </div>
+            </main>
+          </div>
+        </section>
+
+        <section class="demo-slide" data-background-color="#f7f8fc">
+          <div class="demo-shell">
+            <div class="top-rule" aria-hidden="true"></div>
+
+            <header class="demo-header">
+              <p class="eyebrow">EDGEGLASS-AI · LIVE DEMO</p>
+              <h2>실제 동작 시연</h2>
+            </header>
+
+            <main class="demo-content">
+              <div class="demo-video-frame">
+                <div class="video-placeholder" id="demo-placeholder">
+                  <p>시연 영상 삽입 예정</p>
+                </div>
+                <video id="edgeglass-demo" controls playsinline preload="metadata" hidden aria-label="EdgeGlass-AI 실제 동작 시연 영상" data-video-src="videos/edgeglass-demo.mp4">
+                  <source type="video/mp4" />
+                </video>
+              </div>
+
+              <div class="demo-feature-grid" aria-label="시연 기능">
+                <article><h3>MOVE</h3><p>커서 이동</p></article>
+                <article><h3>CLICK</h3><p>마우스 클릭</p></article>
+                <article><h3>DRAG</h3><p>드래그</p></article>
+                <article><h3>STOP</h3><p>커서 정지</p></article>
+              </div>
+            </main>
+          </div>
+        </section>
+
+        <section class="future-slide" data-background-color="#f7f8fc">
+          <div class="future-shell">
+            <div class="top-rule" aria-hidden="true"></div>
+
+            <header class="future-header">
+              <p class="eyebrow">EDGEGLASS-AI · NEXT STEP</p>
+              <h2>향후 개발 계획 및 제작 비용</h2>
+            </header>
+
+            <main class="future-content">
+              <div class="future-left">
+                <article class="concept-card">
+                  <p class="section-label">SMARTGLASS FINAL CONCEPT</p>
+                  <div class="concept-image-wrap">
+                    <img src="assets/images/concepts/smart-ar-glasses-prototype.png" alt="스마트글래스 최종 예상도" />
+                  </div>
+                  <p class="concept-caption">최종 구현 목표를 표현한 콘셉트 이미지</p>
+                </article>
+
+                <article class="roadmap-card">
+                  <p class="section-label">FUTURE DEVELOPMENT PLAN</p>
+                  <div class="roadmap-grid">
+                    <p>BLE 무선 통신 구현</p>
+                    <p>배터리 전원 구성</p>
+                    <p>OLED 디스플레이 및 광학계 구성</p>
+                    <p>안경 프레임에 하드웨어 통합</p>
+                  </div>
+                </article>
+              </div>
+
+              <aside class="cost-card" aria-labelledby="cost-heading">
+                <p class="section-label" id="cost-heading">COMPONENT EXPENSES</p>
+                <table>
+                  <tbody>
+                    <tr><th>K230D-Zero 보드</th><td>약 66,880원</td></tr>
+                    <tr><th>OV5647 카메라</th><td>8,517원</td></tr>
+                    <tr><th>XIAO ESP32-C3</th><td>13,260원</td></tr>
+                    <tr><th>DFR1026</th><td>7,000원</td></tr>
+                    <tr><th>전압 테스터기</th><td>13,700원</td></tr>
+                    <tr><th>방열판</th><td>3,500원</td></tr>
+                    <tr><th>점퍼 케이블</th><td>6,500원</td></tr>
+                    <tr><th>렌즈</th><td>15,190원</td></tr>
+                    <tr><th>디스플레이</th><td>10,500원</td></tr>
+                  </tbody>
+                </table>
+                <div class="cost-total">
+                  <p>총지출 비용</p>
+                  <strong>약 145,000원</strong>
+                  <small>보드 가격은 환율 기준 환산, 배송비 및 별도 수수료 제외</small>
+                </div>
+              </aside>
+            </main>
+          </div>
+        </section>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+    <script src="js/presentation.js"></script>
+  </body>
+</html>
