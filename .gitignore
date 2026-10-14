@@ -6,3 +6,17 @@
 
 # Local VS Code workspace settings
 /.vscode/
+
+# Python runtime files and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Local diagnostics and test artifacts (not part of the presentation site)
+/logs/
+/tests/
+*.log
