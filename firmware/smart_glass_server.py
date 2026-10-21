@@ -63,7 +63,7 @@ FEATURE_DISPLAY_OSD = True        # 기존 HDMI/LCD에 관절 오버레이
 # 이번 재시도의 핵심 확인 사항이다). tools/DEPLOY.md §11 참고.
 FEATURE_WEB_SERVER = True         # HTTP 서버 자체
 FEATURE_WEB_VIDEO = True          # /snapshot, /stream (WEB_SERVER 필요)
-FEATURE_WEB_JOINTS = False        # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
+FEATURE_WEB_JOINTS = True         # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
 
 WEB_PORT = 8060
 WEB_FRAME_WIDTH = 640

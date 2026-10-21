@@ -340,3 +340,68 @@ WEB_PORT = 8060
    `FFD8...FFD9`를 검증한다.
 4. 스트리밍이 성공한 경우에만 AI/UART2 동시 동작과
    `FEATURE_WEB_JOINTS=True` 단계로 진행한다.
+
+---
+
+## H. 2026-10-21 MJPEG 스트림 완료 및 웹 관절 오버레이 재개
+
+### 보드 배포 완료
+
+- `firmware/smart_glass_server.py`의 JPEG 1회 재시도 구현과
+  `FEATURE_WEB_JOINTS=True` 설정은 보드 `/sdcard/smart_glass/` 사본과
+  SHA-256/바이트 일치 확인 완료:
+  `7062630e670d49754d8f2c6aa7cd15d46194af1cf00e2d62112a7b0c8e71562b`.
+- `firmware/web_server.py`는 기존 배포본과 계속 일치:
+  `28a94021360545d93f70a1fcfe23f822af1c7b77f8fe8152cf3ca7f5722c0f24`.
+
+### 실기기 검증 완료
+
+- Wi-Fi 재연결 1회 성공, 보드 IP `172.20.10.2` 확인.
+- `/stream`(관절 OFF 당시): Mac curl이 15초 동안 810,200바이트를 수신했고,
+  MJPEG boundary 66개, JPEG SOI `FFD8` 66개, EOI `FFD9` 66개를 확인했다.
+  curl의 종료 코드 28은 15초 의도적 최대 시간 만료이며 스트림 오류가 아니다.
+- 첫 JPEG 압축 실패가 발생했을 때 `JPEG compression failed once; retrying
+  with a new frame` 로그 뒤 프레임 1이 정상 전송됐다. 이후에도 재시도 후
+  프레임 전송이 계속됐으므로 1회 재시도 복구가 실제 동작함을 확인했다.
+- 같은 스트리밍 구간에 `ACTION: MOVE/CLICK/STOP` 및 `CLICK_TX`가 함께
+  출력됐다. 웹 ON 메인 루프는 약 9~12 FPS, 스트림은 약 4~5 FPS였고,
+  메인 루프 경계에서 `mem_free`는 약 3.90~3.92MB로 회복됐다.
+- 관절 ON 설정으로 재실행 후, `/stream` 로그에서 210프레임 이상(약 4.9~5.7
+  FPS), `ACTION: MOVE/DRAG/STOP`, `CLICK_TX` 동시 동작을 확인했다.
+- **사용자 직접 검증 완료**: 브라우저에서 웹 스트리밍과 손 관절 오버레이가
+  정상 표시되는 것을 확인했다. 현재 지연은 정상 사용에 지장이 없는 수준이다.
+
+### 현재 정상 동작 코드 유지
+
+- 현재 `FEATURE_WEB_JOINTS=True`인 통합 오케스트레이터와 배포된 파일을
+  유지한다. 정상 동작 중인 손 인식, UART2 마우스 제어, HTTP/MJPEG 경로는
+  추가 변경하지 않는다.
+
+### 추후 개선 항목
+
+- FPS 향상 및 스트리밍 지연 최적화. 현재 성능은 사용 가능하므로 기능 회귀를
+  유발할 수 있는 성능 변경은 별도 작업으로 보류한다.
+
+### 미검증·보류
+
+- 마지막 단독 snapshot 시도 직후 USBDBG `short read`가 발생했다. 보드가
+  완전히 무응답인지 아직 확정하지 않았으며, 규칙에 따라 반복 재연결은 하지
+  않았다.
+- Mac bridge의 실제 커서 이동.
+
+### 다음 작업
+
+1. 현 정상 동작 구성을 유지한다.
+2. 필요 시 별도 작업으로 FPS 및 스트리밍 지연 최적화를 수행한다.
+3. 필요 시 Mac bridge의 실제 커서 이동을 별도 검증한다.
+
+---
+
+## I. 2026-10-21 교수님 시연 문서 갱신
+
+- 로컬 문서 `../시연용_README.md`를 전원 재인가부터 종료까지의 시연 절차로
+  갱신했다. Wi-Fi는 `net.py`를 단독 실행하지 않고 CanMV REPL에서
+  `connect(SSID, PASSWORD, timeout_s=60)`를 한 번 호출하는 검증된 방식임을
+  명시했다.
+- 통합 실행 파일은 `firmware/smart_glass_server.py`이며, `README.md`와 실행
+  코드·보드 파일은 변경하지 않았다.
