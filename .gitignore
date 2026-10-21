@@ -48,9 +48,11 @@ pip-wheel-metadata/
 # Local board tracking captures
 logs/tracking_*.csv
 
-# Wi-Fi credentials used by wifi_test/ scripts (SSID/password, local only)
-wifi_test/net_config.py
+# Wi-Fi credentials used by experiments/wifi_test/ scripts (SSID/password, local only)
+experiments/wifi_test/net_config.py
 
-# Diagnostic images saved by wifi_test/ scripts (may contain personal photos)
-wifi_test/*.jpg
-wifi_test/*.jpeg
+# Diagnostic images saved by experiments/wifi_test/ scripts (may contain personal photos)
+experiments/wifi_test/*.jpg
+experiments/wifi_test/*.jpeg
+
+CLAUDE.md

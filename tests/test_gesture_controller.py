@@ -1,5 +1,11 @@
+import os
 import random
+import sys
 import unittest
+
+_FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "firmware")
+if _FIRMWARE_DIR not in sys.path:
+    sys.path.insert(0, _FIRMWARE_DIR)
 
 import gesture_controller as gesture
 

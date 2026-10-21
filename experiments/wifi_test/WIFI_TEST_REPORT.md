@@ -5,7 +5,7 @@
 - 연결 인터페이스: CDC 시리얼 포트 `/dev/cu.usbmodem0010000001` (canmv-k230 MCP 경유)
 - 네트워크: 아이폰 개인용 핫스팟, SSID `i` (비밀번호는 본 문서 및 로그에 기록하지 않음, `wifi_test/net_config.py`에만 보관)
 - 보드 IP `172.20.10.2` / MacBook IP `172.20.10.3` / 게이트웨이 `172.20.10.1`
-- 테스트 코드 위치: 로컬 `EdgeGlass-AI/wifi_test/`, 보드 `/sdcard/wifi_test/` (기존 `/sdcard/smart_glass/`, `main.py`, UART2(`/dev/cu.usbmodem58930597043`)는 전혀 수정하지 않음)
+- 테스트 코드 위치: 로컬 `EdgeGlass-AI/experiments/wifi_test/`(2026-10-21 디렉터리 재정리로 `wifi_test/`에서 이동), 보드 `/sdcard/wifi_test/` (기존 `/sdcard/smart_glass/`, `main.py`, UART2(`/dev/cu.usbmodem58930597043`)는 전혀 수정하지 않음)
 
 > 이 문서는 코드 작성 완료를 "검증 성공"으로 취급하지 않는다. 모든 항목에 실제 하드웨어 실행 결과를 근거로 검증 수준을 표시했다.
 
@@ -251,7 +251,7 @@
 
 - `/sdcard/smart_glass/`, `/sdcard/gesture_controller.py`(루트), 로컬 `main.py`/`hand_tracker.py`/`gesture_controller.py`/`mouse_controller.py`/`ui.py`/`smart_glass.py` 등 기존 파일은 이번 세션에서 전혀 읽기 외의 접근(수정/삭제/덮어쓰기)을 하지 않았다.
 - UART2(`/dev/cu.usbmodem58930597043`)는 세션 내내 사용하지 않았다.
-- 모든 테스트 코드는 로컬 `EdgeGlass-AI/wifi_test/`와 보드 `/sdcard/wifi_test/`에만 생성했다.
+- 모든 테스트 코드는 로컬 `EdgeGlass-AI/experiments/wifi_test/`(당시 `wifi_test/`)와 보드 `/sdcard/wifi_test/`에만 생성했다.
 - MCP 도구가 기본적으로 사용하는 스크래치 경로 `/sdcard/mcp_script.py`는 테스트 종료 후 삭제해 보드를 깨끗한 상태로 되돌렸다.
 
 ---

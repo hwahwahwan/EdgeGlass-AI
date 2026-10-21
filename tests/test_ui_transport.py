@@ -6,6 +6,12 @@ import tempfile
 import types
 import unittest
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _sub in ("firmware", "mac"):
+    _path = os.path.join(_REPO_ROOT, _sub)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import mac_mouse_bridge
 import ui
 

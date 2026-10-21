@@ -32,19 +32,50 @@ def point_to_display(
 
 
 # ============================================================
-# 손 그리기
+# 손 그리기 (공용 코어: 임의의 Image 객체에 그림)
 # ============================================================
+#
+# draw_hand()가 pl.osd_img에만 그릴 수 있던 것을, 웹 스트리밍처럼
+# 임의의 Image 객체(+별도 목표 해상도)에도 그릴 수 있도록 분리했다.
+# 그리는 내용과 좌표 변환 로직은 기존 draw_hand()와 완전히 동일하다.
 
-def draw_hand(
-    pl,
+_SKELETON_CONNECTIONS = [
+
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+
+    (0, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+
+    (0, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),
+
+    (0, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20)
+]
+
+
+def draw_landmarks(
+    image_obj,
 
     det,
     points,
 
     rgb888p_size,
-    display_size,
-
-    info
+    target_size
 ):
 
     # --------------------------------------------------------
@@ -56,7 +87,7 @@ def draw_hand(
         det[3],
 
         rgb888p_size,
-        display_size
+        target_size
     )
 
 
@@ -65,11 +96,11 @@ def draw_hand(
         det[5],
 
         rgb888p_size,
-        display_size
+        target_size
     )
 
 
-    pl.osd_img.draw_rectangle(
+    image_obj.draw_rectangle(
         x1,
         y1,
 
@@ -107,7 +138,7 @@ def draw_hand(
             y,
 
             rgb888p_size,
-            display_size
+            target_size
         )
 
 
@@ -117,12 +148,12 @@ def draw_hand(
             and
             py >= 0
             and
-            px < display_size[0]
+            px < target_size[0]
             and
-            py < display_size[1]
+            py < target_size[1]
         ):
 
-            pl.osd_img.draw_circle(
+            image_obj.draw_circle(
                 px,
                 py,
 
@@ -143,36 +174,7 @@ def draw_hand(
     # Skeleton
     # --------------------------------------------------------
 
-    connections = [
-
-        (0, 1),
-        (1, 2),
-        (2, 3),
-        (3, 4),
-
-        (0, 5),
-        (5, 6),
-        (6, 7),
-        (7, 8),
-
-        (0, 9),
-        (9, 10),
-        (10, 11),
-        (11, 12),
-
-        (0, 13),
-        (13, 14),
-        (14, 15),
-        (15, 16),
-
-        (0, 17),
-        (17, 18),
-        (18, 19),
-        (19, 20)
-    ]
-
-
-    for a, b in connections:
+    for a, b in _SKELETON_CONNECTIONS:
 
         ax = int(
             points[a * 2]
@@ -196,7 +198,7 @@ def draw_hand(
             ay,
 
             rgb888p_size,
-            display_size
+            target_size
         )
 
 
@@ -205,11 +207,11 @@ def draw_hand(
             by,
 
             rgb888p_size,
-            display_size
+            target_size
         )
 
 
-        pl.osd_img.draw_line(
+        image_obj.draw_line(
             ax,
             ay,
             bx,
@@ -236,12 +238,12 @@ def draw_hand(
             points[17],
 
             rgb888p_size,
-            display_size
+            target_size
         )
     )
 
 
-    pl.osd_img.draw_circle(
+    image_obj.draw_circle(
         pointer_x,
         pointer_y,
 
@@ -255,5 +257,29 @@ def draw_hand(
         ),
 
         fill=True
+    )
+
+
+def draw_hand(
+    pl,
+
+    det,
+    points,
+
+    rgb888p_size,
+    display_size,
+
+    info
+):
+
+    # 디스플레이 OSD용 얇은 래퍼. main.py 호출부는 변경하지 않는다.
+    draw_landmarks(
+        pl.osd_img,
+
+        det,
+        points,
+
+        rgb888p_size,
+        display_size
     )
 
