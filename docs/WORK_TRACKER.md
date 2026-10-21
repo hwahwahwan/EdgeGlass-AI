@@ -405,3 +405,30 @@ WEB_PORT = 8060
   명시했다.
 - 통합 실행 파일은 `firmware/smart_glass_server.py`이며, `README.md`와 실행
   코드·보드 파일은 변경하지 않았다.
+
+---
+
+## J. 2026-10-21 시연용 Wi-Fi 한 줄 실행 파일
+
+### 로컬 구현 완료
+
+- `experiments/wifi_test/demo_wifi.py`를 추가했다. 이 파일은 Wi-Fi 연결을
+  구현하지 않고 기존 `net_config.py`의 `SSID`/`PASSWORD`와 `net.py`의
+  `connect(..., timeout_s=60)`만 호출한다.
+- CanMV REPL 실행 경로를 보장하기 위해 `/sdcard/wifi_test`를 `sys.path`에
+  추가한 뒤 모듈을 import한다.
+- 로컬 문법 검사 통과. SHA-256:
+  `e5c3ea4ead83787a8d9324fc95ef1e0f6bebbfdb2b022d39b9e535ae8891c29b`.
+
+### 보드 배포·실기기 검증 완료
+
+- 사용자 전원 재인가 후 CDC 포트 `/dev/cu.usbmodem0010000001`에 연결해
+  `connected: true, ready: true`를 확인했다.
+- `/sdcard/wifi_test/demo_wifi.py`에 배포 후 로컬/보드 SHA-256 및 바이트
+  일치 확인 완료:
+  `e5c3ea4ead83787a8d9324fc95ef1e0f6bebbfdb2b022d39b9e535ae8891c29b`.
+- 전원 재인가 뒤 CanMV에서 정확히 다음 한 줄을 실행했다.
+  `exec(open('/sdcard/wifi_test/demo_wifi.py').read())`
+- 실제 출력: `CONNECT_OK ('172.20.10.2', '255.255.255.240',
+  '172.20.10.1', '172.20.10.1')`. Wi-Fi 연결과 IP 출력 성공을 확인했다.
+- `../시연용_README.md`의 Wi-Fi 여러 줄 명령어를 위 한 줄 명령어로 교체했다.
