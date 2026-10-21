@@ -22,14 +22,21 @@
 "정상 동작"은 전혀 보장하지 않는다.
 """
 
-import gc
-import sys
-import time
-
 from media.sensor import Sensor
 from media.display import Display
 from media.media import *  # noqa: F401,F403  (MediaManager, CAM_CHN_ID_*, ALIGN_UP)
+
+# IMPORTANT: import sys/gc/time/image AFTER the media.media wildcard import,
+# not before. main.py does the same (see its import order). media.media's
+# namespace rebinds the name `sys` as a side effect of `import *`, so
+# `import sys` placed earlier gets silently shadowed and `sys.path` breaks
+# with "AttributeError: 'module' object has no attribute 'path'" (observed
+# on real hardware 2026-10-21, fixed by reordering to match main.py).
+import sys
+import gc
+import time
 import image
+import network
 
 PROJECT_DIR = "/sdcard/smart_glass"
 if PROJECT_DIR not in sys.path:
@@ -50,9 +57,13 @@ import video_stream
 FEATURE_HAND_RECOGNITION = True   # hand_det+handkp_det 추론
 FEATURE_MOUSE_CONTROL = True      # UART2 @MOUSE 송신 (HAND_RECOGNITION 필요)
 FEATURE_DISPLAY_OSD = True        # 기존 HDMI/LCD에 관절 오버레이
+# 2026-10-21 1단계(채널0+2, 웹 OFF) 실기기 검증 성공, 재검증(270+프레임,
+# FPS~20, 메모리 안정)도 완료. 2단계 재시도: 이번엔 핫스팟을 켠 상태에서
+# 진행한다(이전 시도는 핫스팟이 꺼진 상태였고, 그것이 원인이었는지가
+# 이번 재시도의 핵심 확인 사항이다). tools/DEPLOY.md §11 참고.
 FEATURE_WEB_SERVER = True         # HTTP 서버 자체
 FEATURE_WEB_VIDEO = True          # /snapshot, /stream (WEB_SERVER 필요)
-FEATURE_WEB_JOINTS = True         # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
+FEATURE_WEB_JOINTS = False        # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
 
 WEB_PORT = 8060
 WEB_FRAME_WIDTH = 640
@@ -65,6 +76,10 @@ DISPLAY_MODE = "auto"
 
 def log(msg):
     print("[ORCH]", msg)
+
+
+def log_mem(label):
+    log("%s mem_free=%d" % (label, gc.mem_free()))
 
 
 if FEATURE_MOUSE_CONTROL and not FEATURE_HAND_RECOGNITION:
@@ -105,7 +120,9 @@ class CameraRig:
             log("모든 카메라 관련 기능이 꺼져 있어 센서를 열지 않습니다.")
             return
 
+        log("STEP: Sensor() construct")
         self.sensor = Sensor()
+        log("STEP: sensor.reset()")
         self.sensor.reset()
 
         if enable_display:
@@ -117,33 +134,63 @@ class CameraRig:
                 "virt": Display.VIRT,
             }
             display_type = display_map.get(display_mode, Display.ST7701)
+            log("STEP: Display.init()")
             Display.init(display_type, osd_num=1, to_ide=True)
             self.display_size = [Display.width(), Display.height()]
+            log("STEP: Display.init() done, size=%r" % (self.display_size,))
 
+            log("STEP: sensor chn0 framesize/pixformat")
             self.sensor.set_framesize(
                 w=self.display_size[0], h=self.display_size[1], chn=CAM_CHN_ID_0)
             self.sensor.set_pixformat(Sensor.YUV420SP, chn=CAM_CHN_ID_0)
+            log("STEP: sensor chn0 done")
 
         if enable_ai:
+            log("STEP: sensor chn2 framesize/pixformat")
             ai_w = ALIGN_UP(ai_size[0], 16)
             self.sensor.set_framesize(w=ai_w, h=ai_size[1], chn=CAM_CHN_ID_2)
             self.sensor.set_pixformat(Sensor.RGBP888, chn=CAM_CHN_ID_2)
+            log("STEP: sensor chn2 done")
 
         if enable_web:
             # 미검증: 채널 0/2와 동시에 채널 1을 RGB565로 여는 구성.
+            log_mem("STEP: before sensor chn1 (web)")
+            log("STEP: sensor chn1 framesize/pixformat (web, unverified)")
             self.sensor.set_framesize(
                 w=web_size[0], h=web_size[1], chn=CAM_CHN_ID_1)
             self.sensor.set_pixformat(Sensor.RGB565, chn=CAM_CHN_ID_1)
+            log_mem("STEP: sensor chn1 done")
 
-        MediaManager.init()
+        # IMPORTANT (found 2026-10-21 on real hardware): MediaManager.init()
+        # is documented as deprecated (media/media.pyi: "Deprecated media
+        # manager initializer"). libs/PipeLine.py (main.py's proven working
+        # path) never calls it when using Display.init() - Display.init()
+        # appears to bring up the media subsystem itself. Calling the
+        # deprecated MediaManager.init() in addition to Display.init() hung
+        # the board indefinitely (observed: board became unresponsive after
+        # the chn0 setup log line, required a physical power cycle to
+        # recover). experiments/wifi_test/mjpeg_stream_test.py, which never
+        # calls Display.init(), DOES need MediaManager.init() and that
+        # combination works. So: only call it when Display is not in use.
+        if not enable_display:
+            log("STEP: MediaManager.init() (no Display in use)")
+            MediaManager.init()
+            log("STEP: MediaManager.init() done")
+        else:
+            log("STEP: skipping MediaManager.init() (Display.init() already handles it)")
 
         if enable_display:
+            log("STEP: osd_img create")
             self.osd_img = image.Image(
                 self.display_size[0], self.display_size[1], image.ARGB8888)
+            log("STEP: bind_info/bind_layer")
             bind_info = self.sensor.bind_info(x=0, y=0, chn=CAM_CHN_ID_0)
             Display.bind_layer(**bind_info, layer=Display.LAYER_VIDEO1)
+            log("STEP: bind_layer done")
 
+        log("STEP: sensor.run()")
         self.sensor.run()
+        log_mem("STEP: sensor.run() done")
 
     def get_ai_frame(self):
         frame = self.sensor.snapshot(chn=CAM_CHN_ID_2)
@@ -168,10 +215,11 @@ class CameraRig:
                 Display.deinit()
             except Exception as e:
                 log("Display.deinit() err %r" % (e,))
-        try:
-            MediaManager.deinit()
-        except Exception as e:
-            log("MediaManager.deinit() err %r" % (e,))
+        else:
+            try:
+                MediaManager.deinit()
+            except Exception as e:
+                log("MediaManager.deinit() err %r" % (e,))
 
 
 # ============================================================
@@ -185,6 +233,8 @@ class WebState:
         self.streaming = False      # /stream 멀티파트 모드인지
         self.last_frame_sent_ms = 0
         self.frame_interval_ms = 0  # 0이면 매 루프마다 보냄
+        self._stream_frame_count = 0
+        self._stream_start_ms = 0
 
     def start(self, port):
         self.server = web_server.HttpServer(port).start()
@@ -237,20 +287,38 @@ class WebState:
                     self.active = None
                     return
                 jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
+                self._stream_frame_count += 1
+                if self._stream_frame_count <= 3 or self._stream_frame_count % 10 == 0:
+                    elapsed_ms = time.ticks_diff(time.ticks_ms(), self._stream_start_ms)
+                    fps = (self._stream_frame_count * 1000.0 / elapsed_ms) if elapsed_ms > 0 else 0.0
+                    log("/stream frame=%d bytes=%d encode_ms=%d elapsed_ms=%d fps=%.1f mem_free=%d" % (
+                        self._stream_frame_count, len(jpeg), encode_ms, elapsed_ms, fps, gc.mem_free()))
                 session.queue(web_server.mjpeg_part(jpeg))
         except (OSError, ValueError) as e:
-            log("client %r error: %r" % (session.addr, e))
+            if self.streaming:
+                elapsed_ms = time.ticks_diff(time.ticks_ms(), self._stream_start_ms)
+                log("/stream ended frames=%d elapsed_ms=%d err=%r" % (
+                    self._stream_frame_count, elapsed_ms, e))
+            else:
+                log("client %r error: %r" % (session.addr, e))
             session.close()
             self.active = None
             self.streaming = False
 
     def _capture_web_jpeg(self, rig, hand_result):
-        img = rig.get_web_frame()
-        if FEATURE_WEB_JOINTS and hand_result is not None:
-            det, points = hand_result
-            ui.draw_landmarks(img, det, points, AI_RGB888P_SIZE,
-                               [WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT])
-        return video_stream.encode_jpeg(img, quality=WEB_JPEG_QUALITY)
+        for attempt in range(2):
+            img = rig.get_web_frame()
+            if FEATURE_WEB_JOINTS and hand_result is not None:
+                det, points = hand_result
+                ui.draw_landmarks(img, det, points, AI_RGB888P_SIZE,
+                                  [WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT])
+            try:
+                return video_stream.encode_jpeg(img, quality=WEB_JPEG_QUALITY)
+            except OSError as e:
+                if attempt != 0 or "Compression Failed" not in str(e):
+                    raise
+                log("JPEG compression failed once; retrying with a new frame")
+                gc.collect()
 
     def _route(self, rig, hand_result, session, path):
         if path == "/health":
@@ -262,9 +330,15 @@ class WebState:
             session.queue(web_server.http_response("200 OK", "application/json", body))
         elif path == "/snapshot" and FEATURE_WEB_VIDEO:
             jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
+            log("/snapshot bytes=%d encode_ms=%d request_to_ready_ms=%d" % (
+                len(jpeg), encode_ms,
+                time.ticks_diff(time.ticks_ms(), session.created_ms)))
             session.queue(web_server.http_response("200 OK", "image/jpeg", jpeg))
         elif path == "/stream" and FEATURE_WEB_VIDEO:
+            log("/stream start")
             self.streaming = True
+            self._stream_frame_count = 0
+            self._stream_start_ms = time.ticks_ms()
             session.queue(web_server.MJPEG_STREAM_HEADER)
         else:
             body = (
@@ -283,6 +357,7 @@ def main():
     mouse_controller = None
     tracker = None
     web_state = None
+    wlan = None
 
     try:
         rig.create(
@@ -304,12 +379,23 @@ def main():
             mouse_controller = MouseController(AI_RGB888P_SIZE)
 
         if FEATURE_WEB_SERVER:
+            # Constructing the WLAN handle registers the RT-Smart NIC with
+            # MicroPython's socket layer after a soft reboot.  Without this,
+            # bind() fails with OSError('no available NIC') even while the
+            # underlying Wi-Fi link and IP address are still valid.
+            wlan = network.WLAN(network.STA_IF)
+            wlan.active(True)
+            if not wlan.isconnected():
+                raise OSError("Wi-Fi is not connected")
+            log("WLAN ready ifconfig=%r" % (wlan.ifconfig(),))
             web_state = WebState()
             web_state.start(WEB_PORT)
 
+        log_mem("STEP: after all init, before loop")
         log("EdgeGlass-AI orchestrator START")
         frame_count = 0
         last_action = None
+        loop_start_ms = time.ticks_ms()
 
         while True:
             frame_count += 1
@@ -353,6 +439,9 @@ def main():
 
             if frame_count % 30 == 0:
                 gc.collect()
+                elapsed_ms = time.ticks_diff(time.ticks_ms(), loop_start_ms)
+                fps = (frame_count * 1000.0 / elapsed_ms) if elapsed_ms > 0 else 0.0
+                log_mem("main_loop frame=%d fps=%.1f" % (frame_count, fps))
 
     except KeyboardInterrupt:
         log("stopped by user")

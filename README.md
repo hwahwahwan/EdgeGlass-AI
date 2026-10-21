@@ -107,8 +107,10 @@ HandTracker`)로 동작합니다. 자세한 로컬→보드 경로 매핑은 `to
   래퍼(`draw_hand`).
 - `firmware/smart_glass_server.py`: 손 추적(main.py와 동일 로직) + 디스플레이
   OSD + 웹 MJPEG 스트리밍을 하나의 AI 추론 결과로 공유하는 통합 오케스트레이터.
-  기능별 ON/OFF는 파일 상단의 `FEATURE_*` 상수로 제어합니다. **보드 미검증** —
-  자세한 내용은 파일 상단 주석과 `experiments/wifi_test/WIFI_TEST_REPORT.md` 참고.
+  기능별 ON/OFF는 파일 상단의 `FEATURE_*` 상수로 제어합니다. **손 추적+마우스
+  제어+디스플레이 OSD(웹 OFF)는 실기기 검증 완료**(270+프레임, FPS~20,
+  메모리 안정). **웹서버(`FEATURE_WEB_SERVER=True`)는 소켓 bind 단계에서
+  막혀 아직 미완료** — 진행 상황은 `docs/WORK_TRACKER.md`와 `tools/DEPLOY.md` 참고.
 - `firmware/web_server.py`: 논블로킹 HTTP 연결 처리(소켓/accept/요청 파싱).
 - `firmware/video_stream.py`: RGB565 프레임을 JPEG으로 인코딩.
 - `firmware/config.py`: 어디서도 import되지 않는 placeholder. 실행 설정은

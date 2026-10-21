@@ -72,15 +72,21 @@ class HttpServer:
         self._poll = None
 
     def start(self):
+        # 2026-10-21: 3채널(웹 RGB565 포함) + Wi-Fi 연결된 상태에서도 bind()가
+        # 20회 모두 실패하는 사례가 재현되어, 어떤 OSError가 반복되는지
+        # 확인하기 위해 마지막 실패 원인만 최소한으로 남긴다(루프를
+        # 바꾸거나 타임아웃을 추가하지는 않음 — 기존 구조 그대로).
         bind_addr = socket.getaddrinfo("0.0.0.0", self.port)[0][-1]
         sock = None
+        last_err = None
         for attempt in range(self.bind_retry_count):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(bind_addr)
                 break
-            except OSError:
+            except OSError as e:
+                last_err = e
                 try:
                     sock.close()
                 except Exception:
@@ -88,7 +94,8 @@ class HttpServer:
                 sock = None
                 time.sleep_ms(self.bind_retry_delay_ms)
         if sock is None:
-            raise OSError("HttpServer: bind failed after %d retries" % self.bind_retry_count)
+            raise OSError("HttpServer: bind failed after %d retries, last_err=%r"
+                           % (self.bind_retry_count, last_err))
         sock.listen(self.backlog)
         sock.setblocking(False)
         self.sock = sock
@@ -156,7 +163,8 @@ class ClientSession:
 
         self.state = self.STATE_READING
         self.path = None
-        self.last_progress_ms = time.ticks_ms()
+        self.created_ms = time.ticks_ms()
+        self.last_progress_ms = self.created_ms
 
     def is_stale(self):
         return time.ticks_diff(time.ticks_ms(), self.last_progress_ms) > self.idle_timeout_ms
