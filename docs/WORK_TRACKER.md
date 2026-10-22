@@ -432,3 +432,120 @@ WEB_PORT = 8060
 - 실제 출력: `CONNECT_OK ('172.20.10.2', '255.255.255.240',
   '172.20.10.1', '172.20.10.1')`. Wi-Fi 연결과 IP 출력 성공을 확인했다.
 - `../시연용_README.md`의 Wi-Fi 여러 줄 명령어를 위 한 줄 명령어로 교체했다.
+
+---
+
+## K. 2026-10-23 실기기 안정성 진단 — UDP 자동 탐색 + 웹서버 + AI 동시 실행
+
+### 배경
+
+- 사용자가 홈 Wi-Fi(`SK_WiFiGIGA3A00_2.4G`)로 Wi-Fi + 웹서버 + AI 제스처
+  인식 + UDP 자동 탐색(discovery)을 동시에 켜고 실행하자 보드가 멈추거나
+  연결이 끊기는 문제를 보고했다. 직전 시도에서 `config.MOUSE_UDP_MAX_SCAN_HOSTS`를
+  임시로 300까지 올려 `/24` 전체(253개 주소)를 한 번에 스캔했고,
+  `canmv_stop_script` 호출 후 보드가 30초 넘게 무응답 상태가 되어 **물리적
+  전원 재인가로 복구**했다(사용자가 직접 수행).
+- 재현 테스트는 253개 주소 전체 스캔으로 바로 시작하지 않고, 작은 범위부터
+  단계적으로 올리는 방식으로 진행했다. `experiments/runtime_diagnostics/`에
+  `smart_glass_server.main()`을 그대로 재사용하되 `config`/`discovery`
+  속성만 런타임에 monkey-patch하는 1회성 진단 스크립트 두 개를 작성했다
+  (firmware/ 파일은 건드리지 않음, 배포 경로도 `/sdcard/runtime_diagnostics/`로
+  분리):
+  - `diag_stage4_fixed_udp.py`: `MOUSE_UDP_AUTO_DISCOVER=False`, 고정 IP
+    UDP만 사용(탐색 없음).
+  - `diag_stage5_small_discovery.py`: `discovery.compute_scan_targets`를
+    5개 주소(Mac의 실제 IP 포함)로 monkey-patch한 "진짜" `@HELLO/@ACK`
+    탐색 경로.
+
+### K-1. 발견한 버그 — `discovery.py`의 `decode()` 키워드 인자 — 해결/검증 완료
+
+- **증상**: Stage 5(5개 주소 탐색) 실행 중 Mac 브리지가 `[DISCOVERY] Board
+  registered: 192.168.45.44`까지는 정상 출력했지만, 그 직후 보드 터미널에
+  다음 traceback이 뜨며 메인 루프가 죽었다(단, 보드 자체는 멈추지 않고
+  `[ORCH] cleanup done`까지 깔끔하게 출력됨 — 행이 아니라 처리되지 않은
+  예외였다):
+  ```
+  File "/sdcard/smart_glass/discovery.py", line 119, in step
+  TypeError: function doesn't take keyword arguments
+  ```
+- **근거(실기기 REPL로 직접 확인)**: `b"@ACK|ok".decode("utf-8",
+  errors="replace")`는 이 보드의 MicroPython 빌드에서
+  `TypeError: function doesn't take keyword arguments`를 던지고,
+  `b"@ACK|ok".decode("utf-8", "replace")`(같은 인자를 위치 인자로)는
+  정상 동작한다. 즉 이 빌드의 `bytes.decode()`는 **키워드 인자를 전혀
+  받지 않는다**(위치 인자는 받음). `discovery.py`의 `step()`이
+  `data.decode("utf-8", errors="replace")`로 호출하던 것이 원인이었다.
+- **수정 위치**: `firmware/discovery.py`의 `UdpRegistry.step()` — 키워드
+  `errors="replace"`를 위치 인자 `"replace"`로 변경.
+- **검증 결과**: 로컬 단위 테스트(`tests/test_wifi_auto_discovery.py` 포함
+  73개) 전부 통과. 실기기에서 Stage 5를 동일하게 재실행한 결과, 이번에는
+  `TypeError` 없이 `[UDP] Mac registered: 192.168.45.62:9000` /
+  `[UDP] Mouse control ready`가 정상 출력됐고, Mac 쪽에서 실제 손 제스처로
+  발생한 `EVENT MOVE ...` 패킷이 연속으로 수신됐다. **UDP 자동 탐색 +
+  웹서버 + AI + 카메라 동시 실행이 실기기에서 크래시 없이 성공한 첫
+  사례.**
+
+### K-2. 구조 개선 — UDP 트랜스포트 오류가 웹서버/AI를 중단시키지 않도록 격리
+
+- K-1의 `TypeError`처럼 트랜스포트 계층에서 예상 못한 예외가 나면, 기존
+  구조는 `smart_glass_server.main()`의 바깥쪽 `except BaseException`까지
+  그대로 올라가 **카메라/AI/웹서버까지 전부 함께 종료**됐다(K-1 재현
+  당시에도 이 경로로 죽었지만, 보드 자체는 멈추지 않았다).
+- **수정 위치**: `firmware/smart_glass_server.py`
+  - 마우스 컨트롤러/트랜스포트 생성부(`FEATURE_MOUSE_CONTROL` 블록)를
+    `try/except (OSError, ValueError)`로 감싸, 트랜스포트 설정 실패 시
+    `mouse_controller=None`으로 두고 나머지(웹서버/AI)는 그대로 진행하도록
+    변경.
+  - 메인 루프의 `mouse_controller.transport.step()` 호출을
+    `try/except Exception`으로 감싸, 예외 발생 시 로그만 남기고
+    `step`을 그 실행 동안 no-op으로 교체해 **루프 자체는 계속 돌도록**
+    변경(카메라/AI/웹서버는 영향받지 않음).
+- **검증 결과**: 로컬 73개 테스트 통과(회귀 없음). 이번 재현에서는 K-1을
+  고쳐서 예외 자체가 발생하지 않았기 때문에, 이 방어 코드가 실제로 걸리는
+  경로까지는 실기기에서 트리거되지 않았다 — **즉, 이 구조 개선은 로컬
+  구현+단위테스트까지 완료, 실기기에서 "예외가 실제로 발생한 상태에서
+  웹서버/AI가 살아남는지"는 아직 실기기로 직접 검증하지 못했다.**
+
+### K-3. 원래 사건(253개 주소 전체 스캔 시 행)의 원인 — 미확정, 추측 수정 안 함
+
+- **확정된 것**: 원래 행이 발생했던 시도에서는 Mac 쪽에 `[DISCOVERY] Board
+  registered` 로그가 **한 번도 찍히지 않았다** — 즉 ACK가 한 번도
+  처리되지 못했다는 뜻이고, 이는 K-1의 `decode()` 버그가 그 행의 직접
+  원인이 **아니라는** 근거다(그 코드 경로까지 도달하지 못했다).
+- **아직 모르는 것**: 253개의 서로 다른 목적지로 `sendto()`를 짧은 루프
+  안에서 연달아 호출하는 것 자체(ARP 해석 지연, 네트워크 스택 리소스
+  고갈 등)가 행의 원인인지, 아니면 다른 요인(메모리, KPU/카메라 버퍼
+  경쟁 등)인지는 **이번 세션에서 재현 테스트하지 않았다** — 사용자 지시에
+  따라 253개 전체 스캔 재현은 의도적으로 수행하지 않았다.
+- **현재 상태로 유지되는 안전장치**: `config.MOUSE_UDP_MAX_SCAN_HOSTS=64`
+  (기존 기본값, 이번 세션에서 되돌림/재확인 완료) — 이 값 이하에서는 Stage
+  5(5개 주소)로 안전성이 실증됐지만, 64개 전부를 동시에 보내는 경우까지는
+  아직 실기기로 확인되지 않았다.
+- **다음 단계(아직 실행하지 않음)**: 안전하다고 확인된 소규모(5개) 다음
+  단계로, 더 큰 그러나 253보다는 작은 중간 규모(예: 20~30개, 실제 존재하지
+  않는 주소 다수 포함)로 한 단계씩 올려가며 행 재현 여부를 관찰하는 것을
+  권장. 이번 세션에서는 사용자 지시에 따라 진행하지 않았다.
+
+### K-4. 측정값 (Stage 4, 고정 IP UDP + 웹 + AI, 실기기)
+
+- FPS ~10–13.5, `gc.mem_free()` ~3.1–3.9MB로 안정적으로 유지됨(관찰 구간
+  내 메모리 누적 증가 추세 없음).
+- Mac 쪽에서 실제 손 제스처로 발생한 `MOVE`/`CLICK`/`DRAG_START`/`DRAG_END`
+  패킷을 연속으로 수신 — UDP 마우스 제어(고정 IP 경로)의 첫 실기기 종단간
+  검증 성공.
+
+### K-5. 배포·정리 상태
+
+- `firmware/discovery.py`, `firmware/smart_glass_server.py` 수정분을
+  `/sdcard/smart_glass/`에 배포, 보드에서 직접 계산한 SHA-256으로 로컬과
+  바이트 일치 확인 완료.
+- `config.py`의 `MOUSE_UDP_MAX_SCAN_HOSTS`는 테스트 중 300으로 올렸던 것을
+  64로 되돌리고 보드에서 해시로 재확인했다(로컬 값은 처음부터 변경되지
+  않았음).
+- `experiments/runtime_diagnostics/`(로컬)와 `/sdcard/runtime_diagnostics/`
+  (보드)의 두 진단 스크립트는 **삭제하지 않고 유지**했다 — K-3의 253개
+  스캔 행 원인이 아직 확정되지 않아, 추후 중간 규모 재현 테스트를 이
+  스크립트들로 이어서 진행할 수 있도록 남겨둔 것이다. Mac 쪽 임시 dry-run
+  브리지 프로세스(`--dry-run`, PID 파일 `/tmp/diag_bridge5.pid`)는 작업
+  종료 시 중지했다.
+- Git 커밋/푸시는 수행하지 않았다(지시 사항).

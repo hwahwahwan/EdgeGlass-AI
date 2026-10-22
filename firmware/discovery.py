@@ -116,7 +116,10 @@ class UdpRegistry:
             addr = None
 
         if data:
-            text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+            # This board's MicroPython bytes.decode() rejects keyword args
+            # (TypeError: function doesn't take keyword arguments) -- confirmed
+            # on real hardware 2026-10-23. The positional form works fine.
+            text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
             if text.startswith(ACK_PREFIX):
                 previous_peer = self.peer
                 self.peer = addr

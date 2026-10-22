@@ -437,31 +437,41 @@ def main(transport_kind=None, enable_web=None):
             banner_lines.append("[Wi-Fi] Board IP: %s" % ifconfig[0])
 
         if FEATURE_MOUSE_CONTROL:
-            mouse_controller = MouseController(
-                AI_RGB888P_SIZE,
-                transport=transport.create_transport(
-                    mouse_transport_kind,
-                    udp_host=config.MOUSE_UDP_HOST,
-                    udp_port=config.MOUSE_UDP_PORT,
-                    udp_retry_attempts=config.MOUSE_UDP_RETRY_ATTEMPTS,
-                    udp_retry_delay_ms=config.MOUSE_UDP_RETRY_DELAY_MS,
-                    udp_auto_discover=config.MOUSE_UDP_AUTO_DISCOVER,
-                    udp_discovery_ip=ifconfig[0] if ifconfig else None,
-                    udp_discovery_netmask=ifconfig[1] if ifconfig else None,
-                    udp_max_scan_hosts=config.MOUSE_UDP_MAX_SCAN_HOSTS,
-                ),
-            )
-            udp_registry = getattr(mouse_controller.transport, "registry", None)
-            if udp_registry is not None:
-                def _on_mac_registered(peer, _log=banner_print):
-                    _log("[UDP] Mac registered: %s:%d" % (peer[0], peer[1]))
-                    _log("[UDP] Mouse control ready")
-                udp_registry.on_registered = _on_mac_registered
-                banner_lines.append("[UDP] Waiting for Mac registration...")
-            elif mouse_transport_kind == "udp":
-                banner_lines.append(
-                    "[UDP] Fixed target: %s:%s" % (config.MOUSE_UDP_HOST, config.MOUSE_UDP_PORT)
+            # A UDP/discovery setup failure (e.g. subnet too large, no NIC
+            # yet) must not take camera/AI/web down with it -- it only means
+            # this run has no mouse control. See docs/WORK_TRACKER.md
+            # 2026-10-23 real-hardware diagnostic entry.
+            try:
+                mouse_controller = MouseController(
+                    AI_RGB888P_SIZE,
+                    transport=transport.create_transport(
+                        mouse_transport_kind,
+                        udp_host=config.MOUSE_UDP_HOST,
+                        udp_port=config.MOUSE_UDP_PORT,
+                        udp_retry_attempts=config.MOUSE_UDP_RETRY_ATTEMPTS,
+                        udp_retry_delay_ms=config.MOUSE_UDP_RETRY_DELAY_MS,
+                        udp_auto_discover=config.MOUSE_UDP_AUTO_DISCOVER,
+                        udp_discovery_ip=ifconfig[0] if ifconfig else None,
+                        udp_discovery_netmask=ifconfig[1] if ifconfig else None,
+                        udp_max_scan_hosts=config.MOUSE_UDP_MAX_SCAN_HOSTS,
+                    ),
                 )
+            except (OSError, ValueError) as error:
+                banner_print("[MOUSE] transport setup failed, mouse control disabled: %s" % (error,))
+                mouse_controller = None
+
+            if mouse_controller is not None:
+                udp_registry = getattr(mouse_controller.transport, "registry", None)
+                if udp_registry is not None:
+                    def _on_mac_registered(peer, _log=banner_print):
+                        _log("[UDP] Mac registered: %s:%d" % (peer[0], peer[1]))
+                        _log("[UDP] Mouse control ready")
+                    udp_registry.on_registered = _on_mac_registered
+                    banner_lines.append("[UDP] Waiting for Mac registration...")
+                elif mouse_transport_kind == "udp":
+                    banner_lines.append(
+                        "[UDP] Fixed target: %s:%s" % (config.MOUSE_UDP_HOST, config.MOUSE_UDP_PORT)
+                    )
 
         if FEATURE_WEB_SERVER:
             web_state = WebState()
@@ -491,7 +501,19 @@ def main(transport_kind=None, enable_web=None):
             # most one probe burst, so a Mac that hasn't registered yet (or
             # never will) cannot stall the inference loop.
             if mouse_controller is not None and hasattr(mouse_controller.transport, "step"):
-                mouse_controller.transport.step()
+                try:
+                    mouse_controller.transport.step()
+                except Exception as error:
+                    # A transport-layer bug (e.g. the discovery ACK decode
+                    # TypeError found on real hardware 2026-10-23) must not
+                    # take camera/AI/web down with it -- disable stepping
+                    # from here on instead of crashing the whole loop.
+                    sys.print_exception(error)
+                    banner_print(
+                        "[UDP] transport.step() failed, disabling further "
+                        "UDP discovery for this run: %s" % (error,)
+                    )
+                    mouse_controller.transport.step = lambda now_ms=None: None
 
             if FEATURE_HAND_RECOGNITION:
                 ai_frame = rig.get_ai_frame()
