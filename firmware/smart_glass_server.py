@@ -36,7 +36,6 @@ import sys
 import gc
 import time
 import image
-import network
 
 PROJECT_DIR = "/sdcard/smart_glass"
 if PROJECT_DIR not in sys.path:
@@ -45,6 +44,9 @@ if PROJECT_DIR not in sys.path:
 from hand_tracker import HandTracker
 from gesture_controller import GestureController, is_fist
 from mouse_controller import MouseController
+import config
+import transport
+import wifi
 import ui
 import web_server
 import video_stream
@@ -375,19 +377,37 @@ def main():
             tracker = HandTracker(hand_det_model, hand_kp_model, AI_RGB888P_SIZE)
             gesture_controller = GestureController(AI_RGB888P_SIZE)
 
+        mouse_needs_wifi = (
+            FEATURE_MOUSE_CONTROL and config.MOUSE_TRANSPORT == "udp"
+        )
+        if FEATURE_WEB_SERVER or mouse_needs_wifi:
+            # One shared STA connection for both the web server and the UDP
+            # mouse transport. wifi.connect_if_needed() reuses an already
+            # connected link as-is (e.g. the other feature connected first,
+            # or a prior connect survived a soft reboot) instead of forcing
+            # a second connect -- see firmware/wifi.py.
+            try:
+                import wifi_credentials
+                wifi_ssid = getattr(wifi_credentials, "SSID", None)
+                wifi_password = getattr(wifi_credentials, "PASSWORD", None)
+            except ImportError:
+                wifi_ssid = wifi_password = None
+            wlan, ifconfig = wifi.connect_if_needed(wifi_ssid, wifi_password)
+            log("WLAN ready ifconfig=%r" % (ifconfig,))
+
         if FEATURE_MOUSE_CONTROL:
-            mouse_controller = MouseController(AI_RGB888P_SIZE)
+            mouse_controller = MouseController(
+                AI_RGB888P_SIZE,
+                transport=transport.create_transport(
+                    config.MOUSE_TRANSPORT,
+                    udp_host=config.MOUSE_UDP_HOST,
+                    udp_port=config.MOUSE_UDP_PORT,
+                    udp_retry_attempts=config.MOUSE_UDP_RETRY_ATTEMPTS,
+                    udp_retry_delay_ms=config.MOUSE_UDP_RETRY_DELAY_MS,
+                ),
+            )
 
         if FEATURE_WEB_SERVER:
-            # Constructing the WLAN handle registers the RT-Smart NIC with
-            # MicroPython's socket layer after a soft reboot.  Without this,
-            # bind() fails with OSError('no available NIC') even while the
-            # underlying Wi-Fi link and IP address are still valid.
-            wlan = network.WLAN(network.STA_IF)
-            wlan.active(True)
-            if not wlan.isconnected():
-                raise OSError("Wi-Fi is not connected")
-            log("WLAN ready ifconfig=%r" % (wlan.ifconfig(),))
             web_state = WebState()
             web_state.start(WEB_PORT)
 

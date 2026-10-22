@@ -16,6 +16,18 @@ import time
 PREFIX = "@MOUSE|"
 TRACK_PREFIX = "@TRACK|"
 DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
+DEFAULT_UDP_BIND_HOST = "0.0.0.0"
+DEFAULT_UDP_PORT = 9000
+# Easy to change via --drag-timeout. While a drag is genuinely held, the
+# K230 side (mouse_controller.py) sends a DRAG packet every frame -- and a
+# keep-alive at the same rate even through its own brief hand-loss grace
+# period -- so a 1s silence is a reliable signal of an actually dead link,
+# not just a slow frame or a short detector miss.
+DEFAULT_DRAG_TIMEOUT_S = 1.0
+# How often the receive loop wakes up to re-check the watchdog even with no
+# incoming data. Derived from the configured timeout so a much smaller
+# --drag-timeout still gets checked promptly.
+MAX_WATCHDOG_POLL_INTERVAL_S = 0.2
 
 TRACK_FIELDS = (
     "bbox_cx", "bbox_cy", "bbox_w", "bbox_h",
@@ -120,6 +132,95 @@ def parse_message(line):
     if action in ("CLICK", "DRAG_END", "STOP") and len(fields) == 2:
         return action, None, None
     return None
+
+
+class DragWatchdog:
+    """Fail-safe release when no packet arrives while a drag is held.
+
+    Covers Wi-Fi/UDP link loss or packet loss where even DRAG_END never
+    arrives: without this, a dropped connection would leave the OS mouse
+    button held down forever. Any successfully received byte (mouse or
+    tracking) counts as proof the link is alive and resets the timer; only
+    a held drag with no proof-of-life for ``timeout_s`` is force-released.
+    """
+
+    def __init__(self, timeout_s=DEFAULT_DRAG_TIMEOUT_S, clock=time.monotonic):
+        self.timeout_s = timeout_s
+        self._clock = clock
+        self.last_rx = clock()
+
+    def mark_received(self):
+        self.last_rx = self._clock()
+
+    def check(self, mouse):
+        """Return True if a stale drag was just force-released."""
+        if mouse.dragging and (self._clock() - self.last_rx) > self.timeout_s:
+            print("DRAG_WATCHDOG", "no packet for >%.2fs, releasing drag" % self.timeout_s,
+                  file=sys.stderr)
+            mouse.up()
+            self.mark_received()
+            return True
+        return False
+
+
+def handle_line(line, mouse, tracking_logger):
+    """Parse and dispatch exactly one decoded protocol line."""
+    if line.startswith(TRACK_PREFIX):
+        tracking_logger.write(parse_tracking(line))
+        return
+    message = parse_message(line)
+    if message is not None:
+        if message[0] == "CLICK":
+            print("CLICK_RX", "time=", time.time(), "packet=@MOUSE|CLICK", flush=True)
+        dispatch(mouse, message)
+
+
+def process_tick(raw, mouse, tracking_logger, watchdog):
+    """One receive-loop step, shared by the UART and UDP readers.
+
+    ``raw`` is the newly received bytes for this tick, or falsy if nothing
+    arrived (a read timeout). The watchdog is always checked so a stale
+    drag is released even while the link stays completely silent.
+    """
+    if raw:
+        watchdog.mark_received()
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        handle_line(line, mouse, tracking_logger)
+    watchdog.check(mouse)
+
+
+def run_uart_loop(port, baud, mouse, tracking_logger, watchdog, max_ticks=None,
+                   poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S):
+    import serial
+    with serial.Serial(port, baud, timeout=poll_timeout_s) as connection:
+        print("Reading %s at %d baud. Press Ctrl-C to stop." % (port, baud))
+        ticks = 0
+        while max_ticks is None or ticks < max_ticks:
+            process_tick(connection.readline(), mouse, tracking_logger, watchdog)
+            ticks += 1
+
+
+def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_ticks=None,
+                  poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S):
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((bind_host, bind_port))
+    # Shorter than the drag watchdog timeout so a stale drag is still caught
+    # promptly even with no incoming datagrams at all.
+    sock.settimeout(poll_timeout_s)
+    print("Listening for UDP on %s:%d. Press Ctrl-C to stop." % (bind_host, bind_port))
+    try:
+        ticks = 0
+        while max_ticks is None or ticks < max_ticks:
+            try:
+                data, _addr = sock.recvfrom(1024)
+            except socket.timeout:
+                data = None
+            process_tick(data, mouse, tracking_logger, watchdog)
+            ticks += 1
+    finally:
+        sock.close()
 
 
 class DryRunMouse:
@@ -229,13 +330,36 @@ def self_test():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--transport",
+        choices=("uart", "udp"),
+        default="uart",
+        help="Receive @MOUSE records over UART2 (verified) or UDP/Wi-Fi (unverified) (default: %(default)s)."
+    )
+    parser.add_argument(
         "--port",
         default=DEFAULT_UART2_PORT,
-        help="Verified K230 UART2 port (default: %(default)s)."
+        help="Verified K230 UART2 port, used when --transport=uart (default: %(default)s)."
     )
     parser.add_argument("--baud", type=int, default=115200, help="CDC line setting (default: 115200).")
+    parser.add_argument(
+        "--udp-bind-host",
+        default=DEFAULT_UDP_BIND_HOST,
+        help="Local address to listen on, used when --transport=udp (default: %(default)s)."
+    )
+    parser.add_argument(
+        "--udp-port",
+        type=int,
+        default=DEFAULT_UDP_PORT,
+        help="Local UDP port to listen on, used when --transport=udp (default: %(default)s)."
+    )
+    parser.add_argument(
+        "--drag-timeout",
+        type=float,
+        default=DEFAULT_DRAG_TIMEOUT_S,
+        help="Seconds without any packet before a held DRAG is force-released (default: %(default)s)."
+    )
     parser.add_argument("--list", action="store_true", help="List candidate USB serial devices and exit.")
-    parser.add_argument("--dry-run", action="store_true", help="Parse serial input without sending OS events.")
+    parser.add_argument("--dry-run", action="store_true", help="Parse input without sending OS events.")
     parser.add_argument("--self-test", action="store_true", help="Test parser and MOVE/CLICK/DRAG/STOP dispatch safely.")
     args = parser.parse_args()
 
@@ -251,37 +375,34 @@ def main():
     if args.self_test:
         self_test()
         return 0
+
     tracking_logger = TrackingCsvLogger()
-    try:
-        import serial
-    except ImportError:
-        print("Missing dependency: python3 -m pip install pyserial", file=sys.stderr)
-        return 2
+    watchdog = DragWatchdog(timeout_s=args.drag_timeout)
+
+    if args.transport == "uart":
+        try:
+            import serial  # noqa: F401  (import error checked below)
+        except ImportError:
+            print("Missing dependency: python3 -m pip install pyserial", file=sys.stderr)
+            return 2
 
     try:
         mouse = DryRunMouse() if args.dry_run else QuartzMouse()
         if not args.dry_run:
             print("macOS Accessibility permission is required: System Settings > Privacy & Security > Accessibility.")
-        with serial.Serial(args.port, args.baud, timeout=0.5) as connection:
-            print("Reading %s at %d baud. Press Ctrl-C to stop." % (args.port, args.baud))
-            while True:
-                raw = connection.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace")
-                if line.startswith(TRACK_PREFIX):
-                    tracking_logger.write(parse_tracking(line))
-                    continue
-                message = parse_message(line)
-                if message is not None:
-                    if message[0] == "CLICK":
-                        print("CLICK_RX", "time=", time.time(), "packet=@MOUSE|CLICK", flush=True)
-                    dispatch(mouse, message)
+        poll_timeout_s = min(MAX_WATCHDOG_POLL_INTERVAL_S, args.drag_timeout / 5.0)
+        if args.transport == "udp":
+            run_udp_loop(args.udp_bind_host, args.udp_port, mouse, tracking_logger, watchdog,
+                         poll_timeout_s=poll_timeout_s)
+        else:
+            run_uart_loop(args.port, args.baud, mouse, tracking_logger, watchdog,
+                          poll_timeout_s=poll_timeout_s)
     except KeyboardInterrupt:
         print("Stopping bridge.")
     except Exception as exc:
         print("Bridge error: %s" % exc, file=sys.stderr)
-        print("If the port is busy, disconnect VS Code CanMV from that same CDC endpoint before retrying.", file=sys.stderr)
+        if args.transport == "uart":
+            print("If the port is busy, disconnect VS Code CanMV from that same CDC endpoint before retrying.", file=sys.stderr)
         return 1
     finally:
         tracking_logger.close()

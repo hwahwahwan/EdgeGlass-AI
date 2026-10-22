@@ -51,6 +51,10 @@ logs/tracking_*.csv
 # Wi-Fi credentials used by experiments/wifi_test/ scripts (SSID/password, local only)
 experiments/wifi_test/net_config.py
 
+# Wi-Fi credentials for the production smart_glass_server.py UDP mouse
+# transport / web server (SSID/password, local only; same pattern as above)
+firmware/wifi_credentials.py
+
 # Diagnostic images saved by experiments/wifi_test/ scripts (may contain personal photos)
 experiments/wifi_test/*.jpg
 experiments/wifi_test/*.jpeg

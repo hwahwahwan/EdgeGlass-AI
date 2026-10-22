@@ -1,29 +1,31 @@
-"""K230-side UART2 transport for already-decided Smart Glass mouse actions."""
+"""Transport-agnostic sender for already-decided Smart Glass mouse actions.
 
-from machine import UART
+GestureController remains the sole owner of AI, gesture recognition, state
+transitions, and pointer smoothing. This module only turns an action
+transition into one @MOUSE protocol line and hands it to a transport
+(UART2 by default; see transport.py for the Wi-Fi/UDP alternative)."""
+
 import time
+from transport import UartTransport
 
 
 class MouseController:
-    """Translate action transitions into one-line @MOUSE USB-serial records."""
+    """Translate action transitions into one-line @MOUSE protocol records."""
 
-    def __init__(self, pointer_size, invert_x=False, invert_y=False):
+    def __init__(self, pointer_size, invert_x=False, invert_y=False, transport=None):
         self.pointer_width = float(pointer_size[0])
         self.pointer_height = float(pointer_size[1])
         self.invert_x = invert_x
         self.invert_y = invert_y
         self.previous_action = "STOP"
         self.dragging = False
-        # BPI-CanMV-K230D-Zero UART2 is physically connected to the verified
-        # CH342K USB Dual_Serial data port (macOS: cu.usbmodem58930597043).
-        # This leaves the CanMV USB CDC/IDE channel untouched.
-        self.uart = UART(
-            UART.UART2,
-            baudrate=115200,
-            bits=UART.EIGHTBITS,
-            parity=UART.PARITY_NONE,
-            stop=UART.STOPBITS_ONE
-        )
+        self.last_drag_point = None
+        self.transport = transport or UartTransport()
+
+    @property
+    def uart(self):
+        """Backward-compatible access to the UART2 handle when active."""
+        return getattr(self.transport, "uart", None)
 
     def _normalized_point(self, x, y):
         """Clamp an existing K230 pointer position to the 0.0..1.0 protocol."""
@@ -55,7 +57,7 @@ class MouseController:
             message = "@MOUSE|" + action
         else:
             message = "@MOUSE|%s|%.4f|%.4f" % (action, point[0], point[1])
-        self.uart.write(message + "\r\n")
+        self.transport.write(message + "\r\n")
         if action == "CLICK":
             print("CLICK_TX", "ms=", time.ticks_ms(), "packet=", message)
 
@@ -64,7 +66,10 @@ class MouseController:
 
         ``x`` and ``y`` are optional because ``no_hand()`` intentionally has no
         pointer coordinate.  A DRAG held during the gesture controller's hand
-        loss grace period therefore remains held without inventing movement.
+        loss grace period therefore remains held without inventing movement,
+        but still re-sends the last known point as a keep-alive so a
+        receiver-side link watchdog (Wi-Fi/UDP) never mistakes that grace
+        period for a dead connection.
         """
         point = None
         if x is not None and y is not None:
@@ -74,14 +79,19 @@ class MouseController:
         if self.dragging and action != "DRAG":
             self._send("DRAG_END")
             self.dragging = False
+            self.last_drag_point = None
 
         if action == "DRAG":
             if not self.dragging:
                 if point is not None:
                     self._send("DRAG_START", point)
                     self.dragging = True
+                    self.last_drag_point = point
             elif point is not None:
                 self._send("DRAG", point)
+                self.last_drag_point = point
+            elif self.last_drag_point is not None:
+                self._send("DRAG", self.last_drag_point)
 
         elif action == "CLICK":
             # GestureController displays CLICK over multiple frames.  Emit only
@@ -104,7 +114,8 @@ class MouseController:
         if self.dragging:
             self._send("DRAG_END")
             self.dragging = False
+            self.last_drag_point = None
         if self.previous_action != "STOP":
             self._send("STOP")
         self.previous_action = "STOP"
-        self.uart.deinit()
+        self.transport.close()
