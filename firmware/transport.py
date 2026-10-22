@@ -8,6 +8,8 @@ unchanged between transports; only how the bytes leave the board differs.
 import time
 from machine import UART
 
+import discovery
+
 
 class UartTransport:
     """Existing verified path: BPI-CanMV-K230D-Zero UART2 (CH342K bridge)."""
@@ -79,6 +81,75 @@ class UdpTransport:
             pass
 
 
+class AutoDiscoverUdpTransport:
+    """UDP transport that finds the Mac bridge instead of using a fixed IP.
+
+    A phone hotspot reassigns the Mac's IP on every reconnect, so a static
+    MOUSE_UDP_HOST (plain UdpTransport above) silently goes dead. This
+    wraps discovery.UdpRegistry: it probes every host on the board's own
+    subnet, learns the Mac's real (ip, port) from whichever one replies,
+    and only ever sends @MOUSE packets once that peer is known -- never to
+    a guessed address.
+
+    ``step()`` must be called once per orchestrator loop iteration (it does
+    only non-blocking socket I/O, so it cannot stall the AI loop).
+    """
+
+    def __init__(self, ip, netmask, discovery_port, max_scan_hosts=64,
+                 retry_attempts=20, retry_delay_ms=500, socket_module=None,
+                 registry_factory=None):
+        # Validate before opening anything, so a too-large subnet raises
+        # without leaking a socket that would never get closed.
+        targets = discovery.compute_scan_targets(ip, netmask, max_hosts=max_scan_hosts)
+        if not targets:
+            raise ValueError(
+                "auto-discovery found no usable subnet targets for %s/%s "
+                "(subnet too large or degenerate mask) -- set "
+                "MOUSE_UDP_AUTO_DISCOVER=False and configure a fixed "
+                "MOUSE_UDP_HOST/MOUSE_UDP_PORT instead" % (ip, netmask)
+            )
+        self._socket_module = socket_module or __import__("socket")
+        self.sock = self._open_socket(retry_attempts, retry_delay_ms)
+        build_registry = registry_factory or discovery.UdpRegistry
+        self.registry = build_registry(self.sock, targets, discovery_port)
+
+    def _open_socket(self, retry_attempts, retry_delay_ms):
+        # Same soft-reboot NIC race as UdpTransport._connect() above.
+        last_error = None
+        for _ in range(retry_attempts):
+            try:
+                sock = self._socket_module.socket(
+                    self._socket_module.AF_INET, self._socket_module.SOCK_DGRAM
+                )
+                sock.setblocking(False)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                _sleep_ms(retry_delay_ms)
+        raise OSError("UDP discovery socket setup failed: %r" % (last_error,))
+
+    def step(self, now_ms=None):
+        self.registry.step(now_ms)
+
+    def write(self, message):
+        peer = self.registry.destination()
+        if peer is None:
+            # Not registered yet -- see UdpRegistry docstring: never send
+            # to a guessed address.
+            return
+        data = message.encode() if isinstance(message, str) else message
+        try:
+            self.sock.sendto(data, peer)
+        except OSError:
+            pass
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 def _sleep_ms(ms):
     if hasattr(time, "sleep_ms"):
         time.sleep_ms(ms)
@@ -101,11 +172,33 @@ def wifi_is_needed(web_server_enabled, mouse_control_enabled, mouse_transport_ki
 
 def create_transport(kind, uart=None, udp_host=None, udp_port=None,
                       udp_retry_attempts=20, udp_retry_delay_ms=500,
-                      socket_module=None):
-    """Build the transport named by config.MOUSE_TRANSPORT."""
+                      socket_module=None, udp_auto_discover=False,
+                      udp_discovery_ip=None, udp_discovery_netmask=None,
+                      udp_max_scan_hosts=64):
+    """Build the transport named by config.MOUSE_TRANSPORT.
+
+    ``udp_auto_discover`` switches the "udp" kind from the fixed-IP
+    UdpTransport to AutoDiscoverUdpTransport (config.MOUSE_UDP_AUTO_DISCOVER).
+    ``udp_host``/``udp_port`` stay the manual fallback: set
+    udp_auto_discover=False to go back to exactly the old fixed-address
+    behavior with no other code changes.
+    """
     if kind == "uart":
         return UartTransport(uart=uart)
     if kind == "udp":
+        if udp_auto_discover:
+            if not udp_discovery_ip or not udp_discovery_netmask:
+                raise ValueError(
+                    "udp auto-discovery requires udp_discovery_ip and "
+                    "udp_discovery_netmask (the board's own ifconfig)"
+                )
+            return AutoDiscoverUdpTransport(
+                udp_discovery_ip, udp_discovery_netmask, udp_port,
+                max_scan_hosts=udp_max_scan_hosts,
+                retry_attempts=udp_retry_attempts,
+                retry_delay_ms=udp_retry_delay_ms,
+                socket_module=socket_module,
+            )
         if not udp_host or not udp_port:
             raise ValueError("udp transport requires udp_host and udp_port")
         return UdpTransport(

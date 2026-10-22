@@ -6,13 +6,34 @@
 # "uart"(기본, 실기기 검증됨) 또는 "udp"(Wi-Fi, 아직 실기기 미검증).
 MOUSE_TRANSPORT = "uart"
 
-# udp 전송일 때만 사용. Mac에서 mac_mouse_bridge.py --transport udp 로 띄운
-# UDP 리스너의 주소/포트와 일치해야 한다.
-MOUSE_UDP_HOST = "172.20.10.3"
+# udp 포트. Mac에서 mac_mouse_bridge.py --transport udp 로 띄운 UDP
+# 리스너의 포트와 일치해야 한다(기본 9000, 양쪽 기본값이 이미 같다).
 MOUSE_UDP_PORT = 9000
+
+# True(기본): Mac IP를 고정값으로 쓰지 않고, 보드 자신의 서브넷을 스캔해
+# @HELLO/@ACK 핸드셰이크로 Mac을 자동으로 찾는다(firmware/discovery.py).
+# 핫스팟은 재연결마다 Mac에 새 IP를 주므로 고정 IP는 금방 틀려진다.
+# False로 끄면 아래 MOUSE_UDP_HOST 고정 주소로 보내는 예전 방식으로
+# 되돌아간다 — 자동 탐색이 안 되는 환경(서브넷이 너무 크거나 실패)의
+# 수동 대안.
+MOUSE_UDP_AUTO_DISCOVER = True
+
+# MOUSE_UDP_AUTO_DISCOVER=False일 때만 사용하는 고정 목적지(수동 대안).
+# 이 IP는 핫스팟 재연결마다 바뀔 수 있으므로 자동 탐색이 기본이다.
+MOUSE_UDP_HOST = "172.20.10.3"
+
+# 자동 탐색이 한 번에 프로브할 수 있는 서브넷 호스트 수의 상한. 이보다 큰
+# 서브넷(예: 가정용 라우터의 /24)에서는 자동 탐색을 포기하고 예외를 던진다
+# — 이 경우 MOUSE_UDP_AUTO_DISCOVER=False로 바꾸고 MOUSE_UDP_HOST를 직접
+# 설정해야 한다.
+MOUSE_UDP_MAX_SCAN_HOSTS = 64
 
 # 소프트 리부트 직후 소켓 계층이 NIC를 즉시 인식하지 못하는 레이스를 피하기
 # 위한 재시도 횟수/간격(ms). experiments/wifi_test/WIFI_TEST_REPORT.md §0-3,
 # §3-E 실측 근거.
 MOUSE_UDP_RETRY_ATTEMPTS = 20
 MOUSE_UDP_RETRY_DELAY_MS = 500
+
+# STEP:/mem_free/FPS 등 반복 디버깅 로그 on/off. 평소에는 꺼서 Wi-Fi/웹/UDP
+# 등록 상태 같은 핵심 정보만 터미널에 남긴다.
+VERBOSE_ORCHESTRATOR_LOGS = False

@@ -15,9 +15,17 @@ import time
 
 PREFIX = "@MOUSE|"
 TRACK_PREFIX = "@TRACK|"
+HELLO_PREFIX = "@HELLO|"
+ACK_PREFIX = "@ACK|"
 DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
 DEFAULT_UDP_BIND_HOST = "0.0.0.0"
 DEFAULT_UDP_PORT = 9000
+# How often a repeated "couldn't parse this line" diagnostic is allowed to
+# print, so a persistently garbled link doesn't flood the terminal.
+PARSE_FAIL_LOG_INTERVAL_S = 2.0
+# How often main()'s UDP loop re-checks the Mac's own local IP for the
+# "[NET] Local IP changed" diagnostic (ticks are poll_timeout_s apart).
+LOCAL_IP_RECHECK_TICKS = 150
 # Easy to change via --drag-timeout. While a drag is genuinely held, the
 # K230 side (mouse_controller.py) sends a DRAG packet every frame -- and a
 # keep-alive at the same rate even through its own brief hand-loss grace
@@ -109,6 +117,45 @@ def available_ports():
     return sorted(set(paths))
 
 
+def get_local_ip():
+    """Return this Mac's current outbound-route IP, no interface name assumed.
+
+    Standard portable trick: a UDP "connect" never actually sends a packet
+    or requires reachability, it only asks the OS to pick the local address
+    it would use to reach that destination -- so this works for Wi-Fi,
+    Ethernet, USB tethering, whatever interface currently has the default
+    route, and even with no real internet access (a hotspot's own gateway
+    is enough). Returns None rather than raising if there is no route at
+    all (e.g. Wi-Fi fully off).
+    """
+    import socket
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def check_accessibility_trusted():
+    """Best-effort macOS Accessibility trust check, distinct from network issues.
+
+    Returns True/False when the platform API is available, or None when it
+    isn't (missing optional dependency, non-macOS) -- callers should treat
+    None as "unknown", not "denied".
+    """
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+    except ImportError:
+        return None
+    try:
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return None
+
+
 def parse_message(line):
     """Parse exactly one protocol line; return (action, x, y) or None."""
     line = line.strip()
@@ -163,16 +210,43 @@ class DragWatchdog:
         return False
 
 
+# Edge-triggered mouse commands worth a one-line confirmation; MOVE/DRAG are
+# intentionally excluded since they arrive every frame and would otherwise
+# flood the terminal (see requirement: don't let repeated MOVE logging do
+# that).
+_LOGGED_ACTIONS = ("CLICK", "DRAG_START", "DRAG_END", "STOP")
+
+# Mutable module-level state (not a constant) so handle_line's rate limiter
+# survives across calls without needing a class just for this.
+_parse_fail_state = {"last_log": 0.0}
+
+
+def _log_parse_failure(line):
+    now = time.monotonic()
+    if now - _parse_fail_state["last_log"] < PARSE_FAIL_LOG_INTERVAL_S:
+        return
+    _parse_fail_state["last_log"] = now
+    print("PARSE_FAIL", "line=%r" % (line,), file=sys.stderr)
+
+
 def handle_line(line, mouse, tracking_logger):
     """Parse and dispatch exactly one decoded protocol line."""
     if line.startswith(TRACK_PREFIX):
         tracking_logger.write(parse_tracking(line))
         return
+    if line.startswith(HELLO_PREFIX):
+        # Discovery probes are replied to separately in run_udp_loop (the
+        # reply needs the sender address, which only recvfrom() has) --
+        # here they are just a known, expected prefix, not parse garbage.
+        return
     message = parse_message(line)
-    if message is not None:
-        if message[0] == "CLICK":
-            print("CLICK_RX", "time=", time.time(), "packet=@MOUSE|CLICK", flush=True)
-        dispatch(mouse, message)
+    if message is None:
+        _log_parse_failure(line)
+        return
+    if message[0] in _LOGGED_ACTIONS:
+        print("%s_RX" % message[0], "time=", time.time(),
+              "packet=@MOUSE|%s" % message[0], flush=True)
+    dispatch(mouse, message)
 
 
 def process_tick(raw, mouse, tracking_logger, watchdog):
@@ -200,8 +274,25 @@ def run_uart_loop(port, baud, mouse, tracking_logger, watchdog, max_ticks=None,
             ticks += 1
 
 
+def _reply_to_hello(sock, addr, on_registered):
+    """Ack a board's discovery probe directly back to its real address.
+
+    recvfrom() already told us exactly where this came from -- no
+    broadcast or pre-shared address needed. Idempotent: replies every time
+    so a board that restarts (or whose IP changes on hotspot reconnect)
+    re-registers automatically the next time it probes, with no special
+    "already registered" branch to get wrong.
+    """
+    try:
+        sock.sendto((ACK_PREFIX + "ok\r\n").encode(), addr)
+    except OSError:
+        return
+    if on_registered is not None:
+        on_registered(addr)
+
+
 def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_ticks=None,
-                  poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S):
+                  poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S, on_board_registered=None):
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -210,15 +301,26 @@ def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_tic
     # promptly even with no incoming datagrams at all.
     sock.settimeout(poll_timeout_s)
     print("Listening for UDP on %s:%d. Press Ctrl-C to stop." % (bind_host, bind_port))
+    local_ip = get_local_ip()
     try:
         ticks = 0
         while max_ticks is None or ticks < max_ticks:
             try:
-                data, _addr = sock.recvfrom(1024)
+                data, addr = sock.recvfrom(1024)
             except socket.timeout:
-                data = None
+                data, addr = None, None
+
+            if data and data.startswith(HELLO_PREFIX.encode()):
+                _reply_to_hello(sock, addr, on_board_registered)
+
             process_tick(data, mouse, tracking_logger, watchdog)
+
             ticks += 1
+            if ticks % LOCAL_IP_RECHECK_TICKS == 0:
+                current_ip = get_local_ip()
+                if current_ip and current_ip != local_ip:
+                    print("[NET] Local IP changed: %s -> %s" % (local_ip, current_ip))
+                    local_ip = current_ip
     finally:
         sock.close()
 
@@ -388,13 +490,42 @@ def main():
 
     try:
         mouse = DryRunMouse() if args.dry_run else QuartzMouse()
-        if not args.dry_run:
-            print("macOS Accessibility permission is required: System Settings > Privacy & Security > Accessibility.")
+
+        print("========== EdgeGlass-AI Mac Bridge ==========")
+        print("[NET] Local IP: %s" % (get_local_ip() or "unknown"))
+        if args.dry_run:
+            print("[PERMISSION] Accessibility: skipped (--dry-run sends no OS events)")
+        else:
+            trusted = check_accessibility_trusted()
+            if trusted is True:
+                print("[PERMISSION] Accessibility: granted")
+            elif trusted is False:
+                print("[PERMISSION] Accessibility: NOT granted -- "
+                      "System Settings > Privacy & Security > Accessibility")
+            else:
+                print("[PERMISSION] Accessibility: unknown (ApplicationServices not available)")
+
         poll_timeout_s = min(MAX_WATCHDOG_POLL_INTERVAL_S, args.drag_timeout / 5.0)
         if args.transport == "udp":
+            print("[UDP] Listening on %s:%d" % (args.udp_bind_host, args.udp_port))
+            print("[DISCOVERY] Waiting for board...")
+            print("=============================================")
+
+            registered_state = {"board_ip": None}
+
+            def _on_board_registered(addr, _state=registered_state):
+                board_ip = addr[0]
+                if board_ip != _state["board_ip"]:
+                    _state["board_ip"] = board_ip
+                    print("[DISCOVERY] Board registered: %s" % board_ip)
+                    print("[MOUSE] Ready")
+
             run_udp_loop(args.udp_bind_host, args.udp_port, mouse, tracking_logger, watchdog,
-                         poll_timeout_s=poll_timeout_s)
+                         poll_timeout_s=poll_timeout_s, on_board_registered=_on_board_registered)
         else:
+            print("[UART] Port: %s @ %d baud" % (args.port, args.baud))
+            print("[MOUSE] Ready")
+            print("=============================================")
             run_uart_loop(args.port, args.baud, mouse, tracking_logger, watchdog,
                           poll_timeout_s=poll_timeout_s)
     except KeyboardInterrupt:

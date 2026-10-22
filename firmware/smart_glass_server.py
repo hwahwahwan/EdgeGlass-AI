@@ -80,8 +80,23 @@ def log(msg):
     print("[ORCH]", msg)
 
 
+def banner_print(msg):
+    """No "[ORCH]" prefix -- this is the clean status block the terminal
+    output requirement asks for, meant to stay readable next to the
+    existing [ORCH]-prefixed diagnostics rather than replace them."""
+    print(msg)
+
+
+def debug_log(msg):
+    """STEP:/mem_free/FPS-style noise; silenced by default (config.VERBOSE_ORCHESTRATOR_LOGS)
+    so the Wi-Fi/WEB/UDP status banner stays the thing actually visible on
+    the CanMV IDE terminal."""
+    if config.VERBOSE_ORCHESTRATOR_LOGS:
+        log(msg)
+
+
 def log_mem(label):
-    log("%s mem_free=%d" % (label, gc.mem_free()))
+    debug_log("%s mem_free=%d" % (label, gc.mem_free()))
 
 
 if FEATURE_MOUSE_CONTROL and not FEATURE_HAND_RECOGNITION:
@@ -122,9 +137,9 @@ class CameraRig:
             log("모든 카메라 관련 기능이 꺼져 있어 센서를 열지 않습니다.")
             return
 
-        log("STEP: Sensor() construct")
+        debug_log("STEP: Sensor() construct")
         self.sensor = Sensor()
-        log("STEP: sensor.reset()")
+        debug_log("STEP: sensor.reset()")
         self.sensor.reset()
 
         if enable_display:
@@ -136,28 +151,28 @@ class CameraRig:
                 "virt": Display.VIRT,
             }
             display_type = display_map.get(display_mode, Display.ST7701)
-            log("STEP: Display.init()")
+            debug_log("STEP: Display.init()")
             Display.init(display_type, osd_num=1, to_ide=True)
             self.display_size = [Display.width(), Display.height()]
-            log("STEP: Display.init() done, size=%r" % (self.display_size,))
+            debug_log("STEP: Display.init() done, size=%r" % (self.display_size,))
 
-            log("STEP: sensor chn0 framesize/pixformat")
+            debug_log("STEP: sensor chn0 framesize/pixformat")
             self.sensor.set_framesize(
                 w=self.display_size[0], h=self.display_size[1], chn=CAM_CHN_ID_0)
             self.sensor.set_pixformat(Sensor.YUV420SP, chn=CAM_CHN_ID_0)
-            log("STEP: sensor chn0 done")
+            debug_log("STEP: sensor chn0 done")
 
         if enable_ai:
-            log("STEP: sensor chn2 framesize/pixformat")
+            debug_log("STEP: sensor chn2 framesize/pixformat")
             ai_w = ALIGN_UP(ai_size[0], 16)
             self.sensor.set_framesize(w=ai_w, h=ai_size[1], chn=CAM_CHN_ID_2)
             self.sensor.set_pixformat(Sensor.RGBP888, chn=CAM_CHN_ID_2)
-            log("STEP: sensor chn2 done")
+            debug_log("STEP: sensor chn2 done")
 
         if enable_web:
             # 미검증: 채널 0/2와 동시에 채널 1을 RGB565로 여는 구성.
             log_mem("STEP: before sensor chn1 (web)")
-            log("STEP: sensor chn1 framesize/pixformat (web, unverified)")
+            debug_log("STEP: sensor chn1 framesize/pixformat (web, unverified)")
             self.sensor.set_framesize(
                 w=web_size[0], h=web_size[1], chn=CAM_CHN_ID_1)
             self.sensor.set_pixformat(Sensor.RGB565, chn=CAM_CHN_ID_1)
@@ -175,22 +190,22 @@ class CameraRig:
         # calls Display.init(), DOES need MediaManager.init() and that
         # combination works. So: only call it when Display is not in use.
         if not enable_display:
-            log("STEP: MediaManager.init() (no Display in use)")
+            debug_log("STEP: MediaManager.init() (no Display in use)")
             MediaManager.init()
-            log("STEP: MediaManager.init() done")
+            debug_log("STEP: MediaManager.init() done")
         else:
-            log("STEP: skipping MediaManager.init() (Display.init() already handles it)")
+            debug_log("STEP: skipping MediaManager.init() (Display.init() already handles it)")
 
         if enable_display:
-            log("STEP: osd_img create")
+            debug_log("STEP: osd_img create")
             self.osd_img = image.Image(
                 self.display_size[0], self.display_size[1], image.ARGB8888)
-            log("STEP: bind_info/bind_layer")
+            debug_log("STEP: bind_info/bind_layer")
             bind_info = self.sensor.bind_info(x=0, y=0, chn=CAM_CHN_ID_0)
             Display.bind_layer(**bind_info, layer=Display.LAYER_VIDEO1)
-            log("STEP: bind_layer done")
+            debug_log("STEP: bind_layer done")
 
-        log("STEP: sensor.run()")
+        debug_log("STEP: sensor.run()")
         self.sensor.run()
         log_mem("STEP: sensor.run() done")
 
@@ -293,7 +308,7 @@ class WebState:
                 if self._stream_frame_count <= 3 or self._stream_frame_count % 10 == 0:
                     elapsed_ms = time.ticks_diff(time.ticks_ms(), self._stream_start_ms)
                     fps = (self._stream_frame_count * 1000.0 / elapsed_ms) if elapsed_ms > 0 else 0.0
-                    log("/stream frame=%d bytes=%d encode_ms=%d elapsed_ms=%d fps=%.1f mem_free=%d" % (
+                    debug_log("/stream frame=%d bytes=%d encode_ms=%d elapsed_ms=%d fps=%.1f mem_free=%d" % (
                         self._stream_frame_count, len(jpeg), encode_ms, elapsed_ms, fps, gc.mem_free()))
                 session.queue(web_server.mjpeg_part(jpeg))
         except (OSError, ValueError) as e:
@@ -332,7 +347,7 @@ class WebState:
             session.queue(web_server.http_response("200 OK", "application/json", body))
         elif path == "/snapshot" and FEATURE_WEB_VIDEO:
             jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
-            log("/snapshot bytes=%d encode_ms=%d request_to_ready_ms=%d" % (
+            debug_log("/snapshot bytes=%d encode_ms=%d request_to_ready_ms=%d" % (
                 len(jpeg), encode_ms,
                 time.ticks_diff(time.ticks_ms(), session.created_ms)))
             session.queue(web_server.http_response("200 OK", "image/jpeg", jpeg))
@@ -390,6 +405,9 @@ def main(transport_kind=None, enable_web=None):
             tracker = HandTracker(hand_det_model, hand_kp_model, AI_RGB888P_SIZE)
             gesture_controller = GestureController(AI_RGB888P_SIZE)
 
+        ifconfig = None
+        banner_lines = []
+
         if transport.wifi_is_needed(FEATURE_WEB_SERVER, FEATURE_MOUSE_CONTROL, mouse_transport_kind):
             # One shared STA connection for both the web server and the UDP
             # mouse transport. wifi.connect_if_needed() reuses an already
@@ -402,8 +420,14 @@ def main(transport_kind=None, enable_web=None):
                 wifi_password = getattr(wifi_credentials, "PASSWORD", None)
             except ImportError:
                 wifi_ssid = wifi_password = None
-            wlan, ifconfig = wifi.connect_if_needed(wifi_ssid, wifi_password)
-            log("WLAN ready ifconfig=%r" % (ifconfig,))
+            try:
+                wlan, ifconfig = wifi.connect_if_needed(wifi_ssid, wifi_password)
+            except OSError as error:
+                banner_print("[Wi-Fi] Connection failed: %s" % (error,))
+                raise
+            debug_log("WLAN ready ifconfig=%r" % (ifconfig,))
+            banner_lines.append("[Wi-Fi] Connected")
+            banner_lines.append("[Wi-Fi] Board IP: %s" % ifconfig[0])
 
         if FEATURE_MOUSE_CONTROL:
             mouse_controller = MouseController(
@@ -414,15 +438,40 @@ def main(transport_kind=None, enable_web=None):
                     udp_port=config.MOUSE_UDP_PORT,
                     udp_retry_attempts=config.MOUSE_UDP_RETRY_ATTEMPTS,
                     udp_retry_delay_ms=config.MOUSE_UDP_RETRY_DELAY_MS,
+                    udp_auto_discover=config.MOUSE_UDP_AUTO_DISCOVER,
+                    udp_discovery_ip=ifconfig[0] if ifconfig else None,
+                    udp_discovery_netmask=ifconfig[1] if ifconfig else None,
+                    udp_max_scan_hosts=config.MOUSE_UDP_MAX_SCAN_HOSTS,
                 ),
             )
+            udp_registry = getattr(mouse_controller.transport, "registry", None)
+            if udp_registry is not None:
+                def _on_mac_registered(peer, _log=banner_print):
+                    _log("[UDP] Mac registered: %s:%d" % (peer[0], peer[1]))
+                    _log("[UDP] Mouse control ready")
+                udp_registry.on_registered = _on_mac_registered
+                banner_lines.append("[UDP] Waiting for Mac registration...")
+            elif mouse_transport_kind == "udp":
+                banner_lines.append(
+                    "[UDP] Fixed target: %s:%s" % (config.MOUSE_UDP_HOST, config.MOUSE_UDP_PORT)
+                )
 
         if FEATURE_WEB_SERVER:
             web_state = WebState()
             web_state.start(WEB_PORT)
+            banner_lines.append("[WEB] Server started")
+            if ifconfig:
+                banner_lines.append("[WEB] URL: http://%s:%d/" % (ifconfig[0], WEB_PORT))
+
+        if FEATURE_HAND_RECOGNITION:
+            banner_lines.append("[AI] Gesture tracking started")
+
+        banner_print("========== EdgeGlass-AI ==========")
+        for line in banner_lines:
+            banner_print(line)
+        banner_print("==================================")
 
         log_mem("STEP: after all init, before loop")
-        log("EdgeGlass-AI orchestrator START")
         frame_count = 0
         last_action = None
         loop_start_ms = time.ticks_ms()
@@ -430,6 +479,12 @@ def main(transport_kind=None, enable_web=None):
         while True:
             frame_count += 1
             hand_result = None  # (det, points) — 웹/디스플레이가 같이 쓰는 캐시
+
+            # Non-blocking: drains at most one pending reply and sends at
+            # most one probe burst, so a Mac that hasn't registered yet (or
+            # never will) cannot stall the inference loop.
+            if mouse_controller is not None and hasattr(mouse_controller.transport, "step"):
+                mouse_controller.transport.step()
 
             if FEATURE_HAND_RECOGNITION:
                 ai_frame = rig.get_ai_frame()
