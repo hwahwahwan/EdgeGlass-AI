@@ -353,7 +353,20 @@ class WebState:
             session.queue(web_server.http_response("200 OK", "text/html; charset=utf-8", body))
 
 
-def main():
+def main(transport_kind=None, enable_web=None):
+    """Run the orchestrator loop.
+
+    ``transport_kind`` ("uart"/"udp") and ``enable_web`` let a thin entry
+    point (run_uart.py / run_wifi.py) pin the run profile explicitly,
+    without editing config.py or the FEATURE_* constants above. Calling
+    main() with no arguments (e.g. running this file directly) keeps the
+    previous config.py-driven behavior.
+    """
+    global FEATURE_WEB_SERVER
+    if enable_web is not None:
+        FEATURE_WEB_SERVER = enable_web
+    mouse_transport_kind = transport_kind or config.MOUSE_TRANSPORT
+
     rig = CameraRig()
     gesture_controller = None
     mouse_controller = None
@@ -377,10 +390,7 @@ def main():
             tracker = HandTracker(hand_det_model, hand_kp_model, AI_RGB888P_SIZE)
             gesture_controller = GestureController(AI_RGB888P_SIZE)
 
-        mouse_needs_wifi = (
-            FEATURE_MOUSE_CONTROL and config.MOUSE_TRANSPORT == "udp"
-        )
-        if FEATURE_WEB_SERVER or mouse_needs_wifi:
+        if transport.wifi_is_needed(FEATURE_WEB_SERVER, FEATURE_MOUSE_CONTROL, mouse_transport_kind):
             # One shared STA connection for both the web server and the UDP
             # mouse transport. wifi.connect_if_needed() reuses an already
             # connected link as-is (e.g. the other feature connected first,
@@ -399,7 +409,7 @@ def main():
             mouse_controller = MouseController(
                 AI_RGB888P_SIZE,
                 transport=transport.create_transport(
-                    config.MOUSE_TRANSPORT,
+                    mouse_transport_kind,
                     udp_host=config.MOUSE_UDP_HOST,
                     udp_port=config.MOUSE_UDP_PORT,
                     udp_retry_attempts=config.MOUSE_UDP_RETRY_ATTEMPTS,
@@ -469,6 +479,11 @@ def main():
         sys.print_exception(error)
         raise
     finally:
+        # main.py already does this in its own finally block; smart_glass_server.py
+        # was missing it, which could leave a DRAG held on the Mac side if this
+        # script stops (IDE interrupt, exception, Ctrl-C) while mid-drag.
+        if mouse_controller is not None:
+            mouse_controller.close()
         rig.destroy()
         log("cleanup done")
 

@@ -7,6 +7,7 @@ real-hardware Wi-Fi/socket behavior this code is written against.
 
 import importlib
 import os
+import runpy
 import socket as real_socket
 import sys
 import tempfile
@@ -220,6 +221,24 @@ class TransportTests(unittest.TestCase):
             transport.create_transport("udp")  # missing host/port
         with self.assertRaises(ValueError):
             transport.create_transport("carrier_pigeon")
+
+    def test_wifi_is_needed_for_web_server_regardless_of_mouse_transport(self):
+        transport = _fresh_firmware_import("transport", _install_fake_machine())
+        self.assertTrue(transport.wifi_is_needed(True, False, "uart"))
+        self.assertTrue(transport.wifi_is_needed(True, True, "uart"))
+
+    def test_wifi_is_needed_for_udp_mouse_transport_even_without_web(self):
+        transport = _fresh_firmware_import("transport", _install_fake_machine())
+        self.assertTrue(transport.wifi_is_needed(False, True, "udp"))
+
+    def test_wifi_not_needed_for_uart_only_run(self):
+        transport = _fresh_firmware_import("transport", _install_fake_machine())
+        self.assertFalse(transport.wifi_is_needed(False, True, "uart"))
+        self.assertFalse(transport.wifi_is_needed(False, False, "uart"))
+
+    def test_wifi_not_needed_when_mouse_control_disabled_even_if_udp_selected(self):
+        transport = _fresh_firmware_import("transport", _install_fake_machine())
+        self.assertFalse(transport.wifi_is_needed(False, False, "udp"))
 
 
 # ================================================================
@@ -536,6 +555,44 @@ class UdpLoopIntegrationTests(unittest.TestCase):
             finally:
                 client.close()
                 logger.close()
+
+
+# ================================================================
+# firmware/run_uart.py, firmware/run_wifi.py: thin CanMV IDE entry points
+# ================================================================
+
+class RunProfileEntryPointTests(unittest.TestCase):
+    """Verify each entry point pins the right run profile, without ever
+    importing the real smart_glass_server.py (which requires hardware-only
+    media.* modules not available off-board)."""
+
+    def _run_entry_point(self, filename):
+        calls = []
+
+        def fake_main(transport_kind=None, enable_web=None):
+            calls.append({"transport_kind": transport_kind, "enable_web": enable_web})
+
+        fake_module = types.ModuleType("smart_glass_server")
+        fake_module.main = fake_main
+        original = sys.modules.get("smart_glass_server")
+        sys.modules["smart_glass_server"] = fake_module
+        try:
+            path = os.path.join(_REPO_ROOT, "firmware", filename)
+            runpy.run_path(path, run_name="__main__")
+        finally:
+            if original is None:
+                sys.modules.pop("smart_glass_server", None)
+            else:
+                sys.modules["smart_glass_server"] = original
+        return calls
+
+    def test_run_uart_pins_uart_transport_and_disables_web(self):
+        calls = self._run_entry_point("run_uart.py")
+        self.assertEqual(calls, [{"transport_kind": "uart", "enable_web": False}])
+
+    def test_run_wifi_pins_udp_transport_and_enables_web(self):
+        calls = self._run_entry_point("run_wifi.py")
+        self.assertEqual(calls, [{"transport_kind": "udp", "enable_web": True}])
 
 
 if __name__ == "__main__":

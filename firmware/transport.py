@@ -86,6 +86,19 @@ def _sleep_ms(ms):
         time.sleep(ms / 1000.0)
 
 
+def wifi_is_needed(web_server_enabled, mouse_control_enabled, mouse_transport_kind):
+    """True exactly when a run profile needs an active Wi-Fi link.
+
+    Pure decision logic shared by smart_glass_server.main() (called from
+    run_uart.py / run_wifi.py). Kept here, independent of any
+    hardware-only module, so the uart-vs-udp / web-on-vs-off wiring stays
+    unit-testable without mocking media.sensor etc.
+    """
+    return bool(web_server_enabled) or (
+        bool(mouse_control_enabled) and mouse_transport_kind == "udp"
+    )
+
+
 def create_transport(kind, uart=None, udp_host=None, udp_port=None,
                       udp_retry_attempts=20, udp_retry_delay_ms=500,
                       socket_module=None):

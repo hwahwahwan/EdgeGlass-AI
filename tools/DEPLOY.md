@@ -332,3 +332,82 @@ OSError: HttpServer: bind failed after 20 retries
   `FEATURE_WEB_VIDEO=True`, `FEATURE_WEB_JOINTS=False`로 보드에 남아있는 상태).
 - `firmware/web_server.py`: 로컬에 `last_err` 로깅 추가, **보드는 구버전
   그대로(아직 미배포)**.
+
+## 2026-10-22 UART 실기기 실행 오류 원인 분석 및 수정, 신규 파일 배포
+
+**증상**: 사용자가 `run_uart.py`를 실기기에서 실행하자
+`ImportError: no module named 'smart_glass_server'`가 발생. 로컬 자동
+테스트 45개는 모두 통과한 상태였다 — PC 테스트 통과와 실기기 동작은
+별개임을 보여준 사례.
+
+**원인 (둘 다 실제로 재현/확인함)**:
+1. `run_uart.py`/`run_wifi.py`가 `import smart_glass_server`를 호출하기
+   전에 `sys.path`에 `/sdcard/smart_glass`를 넣지 않았다. CanMV는
+   실행 중인 스크립트 자신의 디렉터리를 `sys.path`에 자동으로 넣지
+   않는다(CPython과 다름) — `main.py`와 `smart_glass_server.py`는 이미
+   이 패턴(`PROJECT_DIR` 삽입)으로 우회하고 있었는데, 새 진입점 두 개만
+   빠뜨렸다.
+2. 이번 세션에서 로컬에 추가/수정한 파일들이 **보드에 전혀 올라가 있지
+   않았다**. 보드의 `/sdcard/smart_glass/`에는 `transport.py`, `wifi.py`,
+   `wifi_credentials.py`, `run_uart.py`, `run_wifi.py`가 아예 없었고,
+   `mouse_controller.py`/`config.py`/`smart_glass_server.py`는 transport
+   분리 이전의 구버전이었다.
+
+**수정 및 배포**: `run_uart.py`/`run_wifi.py`에 `PROJECT_DIR` sys.path
+삽입을 추가(기존 두 파일과 동일 패턴). 아래 8개 파일을 CDC
+(`/dev/cu.usbmodem0010000001`, `canmv_board_info`로 `connected: true,
+ready: true` 확인 후 사용)로 배포했다: `transport.py`, `wifi.py`,
+`wifi_credentials.py`, `config.py`, `mouse_controller.py`, `run_uart.py`,
+`run_wifi.py`, `smart_glass_server.py`. 나머지 6개 파일(`main.py`,
+`hand_tracker.py`, `gesture_controller.py`, `ui.py`, `video_stream.py`,
+`web_server.py`)은 보드 내용을 읽어 로컬과 바이트 수·내용이 일치함을
+확인하고 그대로 두었다(불필요한 재배포 방지). UART2
+(`/dev/cu.usbmodem58930597043`, 당시 Mac 브리지가 이미 점유 중)는 배포
+중 전혀 사용하지 않았다.
+
+**해시 검증**: 8개 파일 모두 쓰기 후 재다운로드해 로컬과 바이트 수가
+일치했고, 그중 7개(`transport.py`, `wifi.py`, `wifi_credentials.py`,
+`mouse_controller.py`, `run_uart.py`, `run_wifi.py`, `smart_glass_server.py`)는
+SHA-256까지 일치를 확인했다. `config.py`는 최초 수동 base64 대조에서
+해시가 달라 보여 재확인했는데, UTF-8 재다운로드 내용을 로컬과 다시
+비교하자 완전히 일치했다 — 원인은 긴 base64 문자열을 터미널로 수동
+전사하는 과정의 실수였고, 실제 보드 파일은 처음부터 정상이었다. (다음
+작업자 참고: 대용량 파일 해시 대조는 base64 수동 전사보다 UTF-8
+재다운로드 내용을 그대로 파일로 저장해 비교하는 쪽이 더 안전하다.)
+
+**실기기 검증 (실제로 확인됨)**:
+- `canmv_run_script`로 `transport`/`wifi`/`config`/`mouse_controller`/
+  `smart_glass_server` 5개 모듈을 모두 정상 임포트 확인(`ImportError`
+  재발 없음).
+- `canmv_execute_file("/sdcard/smart_glass/run_uart.py")` 실행 결과:
+  `Sensor()` 생성 → `Display.init() size=[800, 480]` → 채널0/2 설정 →
+  `MediaManager.init() 스킵`(Display 경로이므로 정상) → `sensor.run()` →
+  `[ORCH] EdgeGlass-AI orchestrator START`까지 전 단계 정상 로그 확인.
+  이후 약 330프레임(FPS 10.5~14.3, `mem_free` 약 3.9MB로 안정) 동안 실제
+  손 제스처에 반응해 `ACTION: MOVE`/`STOP`/`DRAG` 전환과
+  `CLICK_TX ms=... packet= @MOUSE|CLICK` UART 송신이 여러 차례 발생했다.
+  Wi-Fi는 전혀 사용하지 않음(요구사항대로 핫스팟 미점등 상태로 진행).
+- `canmv_stop_script()`로 정상 종료, `[ORCH] cleanup done`까지 확인.
+
+**이 과정에서 발견한 별도 버그(수정함)**: `smart_glass_server.py`의
+`finally` 블록이 `mouse_controller.close()`를 호출하지 않고 있었다
+(`main.py`는 이미 호출함). DRAG 도중 스크립트가 중단되면(IDE 인터럽트,
+예외, Ctrl-C) K230 쪽에서 `DRAG_END`/`STOP`을 보내지 않아 Mac 쪽 마우스
+버튼이 눌린 채로 남을 수 있는 안전 공백이었다. 실제로 테스트 중
+`ACTION: DRAG`가 발생한 뒤 `stop_script`로 중단하면서 발견했다. `finally`
+블록에 `mouse_controller.close()` 호출을 추가(`main.py`와 동일 패턴)하고
+재배포, 임포트 재확인까지 완료했다. **DRAG 도중 정확히 중단되는 상황을
+실기기에서 재현해 `DRAG_END`가 실제로 나가는지까지는 확인하지 못했다 —
+다음 검증 항목.**
+
+**미검증 항목 (PASS로 보고하지 않음)**:
+- `run_wifi.py`(Wi-Fi/UDP 경로)는 보드 배포·임포트까지만 확인했고, 핫스팟을
+  켠 실제 연결/UDP 마우스 전송/웹 스트리밍 동작은 이번 세션에서 시도하지
+  않았다(사용자 지시).
+- DRAG 도중 강제 중단 시 `mouse_controller.close()` 수정이 실제로
+  `DRAG_END`를 내보내는지 실기기 재현 미확인.
+- 장시간(수 분 이상) 연속 실행 시 메모리/FPS 추이는 약 30초 구간만
+  관측했고 그 이상은 미확인.
+- Mac 브리지가 이번 테스트의 `CLICK_TX`를 실제로 `CLICK_RX`로 수신했는지는
+  Mac 쪽 터미널을 직접 보지 않아 확인하지 못했다(사용자가 별도로 띄워둔
+  프로세스).
