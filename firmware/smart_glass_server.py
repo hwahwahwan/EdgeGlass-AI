@@ -413,20 +413,27 @@ def main(transport_kind=None, enable_web=None):
             # mouse transport. wifi.connect_if_needed() reuses an already
             # connected link as-is (e.g. the other feature connected first,
             # or a prior connect survived a soft reboot) instead of forcing
-            # a second connect -- see firmware/wifi.py.
+            # a second connect -- see firmware/wifi.py. Home Wi-Fi is tried
+            # first, phone hotspot as fallback (firmware/wifi_credentials.py).
             try:
                 import wifi_credentials
-                wifi_ssid = getattr(wifi_credentials, "SSID", None)
-                wifi_password = getattr(wifi_credentials, "PASSWORD", None)
+                wifi_networks = [
+                    (getattr(wifi_credentials, "HOME_SSID", None),
+                     getattr(wifi_credentials, "HOME_PASSWORD", None)),
+                    (getattr(wifi_credentials, "HOTSPOT_SSID", None),
+                     getattr(wifi_credentials, "HOTSPOT_PASSWORD", None)),
+                ]
             except ImportError:
-                wifi_ssid = wifi_password = None
+                wifi_networks = []
             try:
-                wlan, ifconfig = wifi.connect_if_needed(wifi_ssid, wifi_password)
+                wlan, ifconfig, connected_ssid = wifi.connect_if_needed(wifi_networks)
             except OSError as error:
                 banner_print("[Wi-Fi] Connection failed: %s" % (error,))
                 raise
-            debug_log("WLAN ready ifconfig=%r" % (ifconfig,))
-            banner_lines.append("[Wi-Fi] Connected")
+            debug_log("WLAN ready ifconfig=%r ssid=%r" % (ifconfig, connected_ssid))
+            banner_lines.append("[Wi-Fi] Connected" + (
+                " (%s)" % connected_ssid if connected_ssid else ""
+            ))
             banner_lines.append("[Wi-Fi] Board IP: %s" % ifconfig[0])
 
         if FEATURE_MOUSE_CONTROL:

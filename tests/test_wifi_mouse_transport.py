@@ -327,12 +327,24 @@ class _FakeClock:
 
 
 class _FakeWlan:
-    def __init__(self, already_connected=False, connect_after_polls=1):
+    """``connect_after_polls`` is the default per-network success threshold;
+    ``connect_after_polls_by_ssid`` overrides it for specific SSIDs (use
+    ``None`` for an SSID that must never connect), and ``fail_connect_ssids``
+    makes ``connect()`` itself raise for those SSIDs -- together these model
+    a home-network attempt that fails/times out before the hotspot fallback
+    succeeds.
+    """
+
+    def __init__(self, already_connected=False, connect_after_polls=1,
+                 connect_after_polls_by_ssid=None, fail_connect_ssids=None):
         self.active_calls = []
         self.connect_calls = []
         self._already_connected = already_connected
         self._connect_after_polls = connect_after_polls
+        self._connect_after_polls_by_ssid = connect_after_polls_by_ssid or {}
+        self._fail_connect_ssids = set(fail_connect_ssids or ())
         self._poll_count = 0
+        self._current_ssid = None
 
     def active(self, flag):
         self.active_calls.append(flag)
@@ -340,11 +352,23 @@ class _FakeWlan:
     def isconnected(self):
         if self._already_connected:
             return True
+        if self._current_ssid is None:
+            return False
         self._poll_count += 1
-        return self._poll_count > self._connect_after_polls
+        threshold = self._connect_after_polls_by_ssid.get(
+            self._current_ssid, self._connect_after_polls
+        )
+        if threshold is None:
+            return False
+        return self._poll_count > threshold
 
     def connect(self, ssid, password):
         self.connect_calls.append((ssid, password))
+        if ssid in self._fail_connect_ssids:
+            self._current_ssid = None
+            raise OSError("connect failed for %r" % (ssid,))
+        self._current_ssid = ssid
+        self._poll_count = 0
 
     def ifconfig(self):
         return ("172.20.10.9", "255.255.255.240", "172.20.10.1", "172.20.10.1")
@@ -375,36 +399,82 @@ class WifiReuseTests(unittest.TestCase):
         wlan = _FakeWlan(already_connected=True)
         wifi = _fresh_wifi_import(_install_fake_network(wlan))
         wifi.time = _FakeClock()
-        returned_wlan, ifconfig = wifi.connect_if_needed("some-ssid", "some-pw")
+        returned_wlan, ifconfig, ssid = wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")]
+        )
         self.assertIs(returned_wlan, wlan)
         self.assertEqual(wlan.connect_calls, [])
         self.assertEqual(ifconfig, wlan.ifconfig())
+        self.assertIsNone(ssid)  # already connected -- which network is unknown
 
-    def test_not_connected_calls_connect_exactly_once_then_polls(self):
+    def test_first_network_connects_without_trying_the_second(self):
         wlan = _FakeWlan(already_connected=False, connect_after_polls=3)
         wifi = _fresh_wifi_import(_install_fake_network(wlan))
         wifi.time = _FakeClock()
-        _wlan, ifconfig = wifi.connect_if_needed("ssid", "pw", timeout_s=30)
-        self.assertEqual(wlan.connect_calls, [("ssid", "pw")])
+        _wlan, ifconfig, ssid = wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")], timeout_s=30
+        )
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw")])
+        self.assertEqual(ifconfig, wlan.ifconfig())
+        self.assertEqual(ssid, "home")
+
+    def test_falls_back_to_hotspot_when_home_network_times_out(self):
+        wlan = _FakeWlan(
+            already_connected=False,
+            connect_after_polls_by_ssid={"home": None, "hotspot": 1},
+        )
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        _wlan, ifconfig, ssid = wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")], timeout_s=1
+        )
+        # IMPORTANT (see firmware/wifi.py docstring): exactly one connect()
+        # call per candidate -- the home timeout must not have retried it.
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw"), ("hotspot", "hotspot-pw")])
+        self.assertEqual(ssid, "hotspot")
         self.assertEqual(ifconfig, wlan.ifconfig())
 
-    def test_timeout_raises_oserror_without_retrying_connect(self):
-        wlan = _FakeWlan(already_connected=False, connect_after_polls=10_000)
+    def test_falls_back_to_hotspot_when_home_connect_raises(self):
+        wlan = _FakeWlan(
+            already_connected=False,
+            fail_connect_ssids={"home"},
+            connect_after_polls_by_ssid={"hotspot": 0},
+        )
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        _wlan, ifconfig, ssid = wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")]
+        )
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw"), ("hotspot", "hotspot-pw")])
+        self.assertEqual(ssid, "hotspot")
+        self.assertEqual(ifconfig, wlan.ifconfig())
+
+    def test_blank_network_entries_are_skipped(self):
+        wlan = _FakeWlan(already_connected=False, connect_after_polls=0)
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        _wlan, _ifconfig, ssid = wifi.connect_if_needed(
+            [(None, None), ("", ""), ("real", "real-pw")]
+        )
+        self.assertEqual(wlan.connect_calls, [("real", "real-pw")])
+        self.assertEqual(ssid, "real")
+
+    def test_timeout_on_every_network_raises_oserror(self):
+        wlan = _FakeWlan(already_connected=False, connect_after_polls=None)
         wifi = _fresh_wifi_import(_install_fake_network(wlan))
         wifi.time = _FakeClock()
         with self.assertRaises(OSError):
-            wifi.connect_if_needed("ssid", "pw", timeout_s=1)
-        # IMPORTANT (see firmware/wifi.py docstring): calling connect() again
-        # while one is in progress aborts it, so a timeout must not have
-        # triggered more than the one original connect() call.
-        self.assertEqual(wlan.connect_calls, [("ssid", "pw")])
+            wifi.connect_if_needed(
+                [("home", "home-pw"), ("hotspot", "hotspot-pw")], timeout_s=1
+            )
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw"), ("hotspot", "hotspot-pw")])
 
-    def test_missing_ssid_raises_without_touching_connect(self):
+    def test_empty_network_list_raises_without_connecting(self):
         wlan = _FakeWlan(already_connected=False)
         wifi = _fresh_wifi_import(_install_fake_network(wlan))
         wifi.time = _FakeClock()
         with self.assertRaises(OSError):
-            wifi.connect_if_needed(None, None)
+            wifi.connect_if_needed([])
         self.assertEqual(wlan.connect_calls, [])
 
 
