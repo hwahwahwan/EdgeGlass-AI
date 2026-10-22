@@ -329,20 +329,26 @@ class _FakeClock:
 class _FakeWlan:
     """``connect_after_polls`` is the default per-network success threshold;
     ``connect_after_polls_by_ssid`` overrides it for specific SSIDs (use
-    ``None`` for an SSID that must never connect), and ``fail_connect_ssids``
-    makes ``connect()`` itself raise for those SSIDs -- together these model
+    ``None`` for an SSID that must never connect), ``fail_connect_ssids``
+    makes ``connect()`` itself raise for those SSIDs, and
+    ``reject_connect_ssids`` makes ``connect()`` return ``False`` for those
+    SSIDs (confirmed real-hardware behavior 2026-10-23: a driver-level
+    rejection, e.g. wrong password, reports itself this way rather than by
+    raising or by isconnected() ever turning True) -- together these model
     a home-network attempt that fails/times out before the hotspot fallback
     succeeds.
     """
 
     def __init__(self, already_connected=False, connect_after_polls=1,
-                 connect_after_polls_by_ssid=None, fail_connect_ssids=None):
+                 connect_after_polls_by_ssid=None, fail_connect_ssids=None,
+                 reject_connect_ssids=None):
         self.active_calls = []
         self.connect_calls = []
         self._already_connected = already_connected
         self._connect_after_polls = connect_after_polls
         self._connect_after_polls_by_ssid = connect_after_polls_by_ssid or {}
         self._fail_connect_ssids = set(fail_connect_ssids or ())
+        self._reject_connect_ssids = set(reject_connect_ssids or ())
         self._poll_count = 0
         self._current_ssid = None
 
@@ -367,6 +373,9 @@ class _FakeWlan:
         if ssid in self._fail_connect_ssids:
             self._current_ssid = None
             raise OSError("connect failed for %r" % (ssid,))
+        if ssid in self._reject_connect_ssids:
+            self._current_ssid = None
+            return False
         self._current_ssid = ssid
         self._poll_count = 0
 
@@ -476,6 +485,53 @@ class WifiReuseTests(unittest.TestCase):
         with self.assertRaises(OSError):
             wifi.connect_if_needed([])
         self.assertEqual(wlan.connect_calls, [])
+
+    def test_driver_rejection_skips_straight_to_next_network(self):
+        # Real-hardware finding 2026-10-23: wlan.connect() returning False
+        # means the driver already rejected the candidate (e.g. wrong
+        # password) -- this must not still burn the full per-network
+        # timeout waiting for isconnected(), which would never turn True.
+        wlan = _FakeWlan(
+            already_connected=False,
+            reject_connect_ssids={"home"},
+            connect_after_polls_by_ssid={"hotspot": 0},
+        )
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        _wlan, ifconfig, ssid = wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")], timeout_s=30
+        )
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw"), ("hotspot", "hotspot-pw")])
+        self.assertEqual(ssid, "hotspot")
+        self.assertEqual(ifconfig, wlan.ifconfig())
+
+    def test_driver_rejection_of_every_network_raises_oserror_with_reason(self):
+        wlan = _FakeWlan(already_connected=False, reject_connect_ssids={"home", "hotspot"})
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        with self.assertRaises(OSError) as ctx:
+            wifi.connect_if_needed(
+                [("home", "home-pw"), ("hotspot", "hotspot-pw")], timeout_s=30
+            )
+        self.assertIn("hotspot", str(ctx.exception))
+        self.assertEqual(wlan.connect_calls, [("home", "home-pw"), ("hotspot", "hotspot-pw")])
+
+    def test_on_progress_reports_each_attempt_and_outcome(self):
+        wlan = _FakeWlan(
+            already_connected=False,
+            reject_connect_ssids={"home"},
+            connect_after_polls_by_ssid={"hotspot": 0},
+        )
+        wifi = _fresh_wifi_import(_install_fake_network(wlan))
+        wifi.time = _FakeClock()
+        messages = []
+        wifi.connect_if_needed(
+            [("home", "home-pw"), ("hotspot", "hotspot-pw")],
+            timeout_s=30, on_progress=messages.append,
+        )
+        self.assertTrue(any("home" in m and "connecting" in m for m in messages))
+        self.assertTrue(any("home" in m and "rejected" in m for m in messages))
+        self.assertTrue(any("hotspot" in m and "connected" in m for m in messages))
 
 
 # ================================================================

@@ -549,3 +549,90 @@ WEB_PORT = 8060
   브리지 프로세스(`--dry-run`, PID 파일 `/tmp/diag_bridge5.pid`)는 작업
   종료 시 중지했다.
 - Git 커밋/푸시는 수행하지 않았다(지시 사항).
+
+---
+
+## L. 2026-10-23 Wi-Fi 시연 실행 문제 — README 경로 재현 및 수정
+
+### 배경
+
+사용자가 `시연용_README.md`를 보고 직접 `run_wifi.py`를 실행했을 때 Wi-Fi
+연결이 반복 실패했다고 보고했다(`run connect failed.` 반복, 웹서버 접속
+안 됨). K절 진단 때 썼던 `experiments/runtime_diagnostics/` 몬키패치
+스크립트가 아니라, 사용자가 실제로 쓰는 `firmware/run_wifi.py` 그 자체로
+재현·수정했다.
+
+### L-1. `wifi.connect_if_needed()`가 드라이버 거부를 무시하던 문제 — 해결/검증 완료
+
+- **근거(실기기 REPL로 직접 확인)**: `wlan.connect(ssid, password)`가 이
+  보드에서 **`False`를 반환**하는 경우(드라이버가 그 네트워크를 즉시
+  거부 — 비밀번호 오류, 보안 모드 비호환 등)가 있는데, 기존
+  `connect_if_needed()`는 이 반환값을 전혀 확인하지 않고 그냥
+  `isconnected()`를 최대 `timeout_s`(기본 30초)까지 기다렸다 — 드라이버가
+  이미 "안 된다"고 답한 뒤에도 쓸모없이 수십 초를 더 낭비하고, 사용자에게는
+  아무 이유도 보여주지 않은 채 조용히 다음 네트워크로 넘어갔다.
+- **수정 위치**: `firmware/wifi.py`의 `connect_if_needed()` — `wlan.connect()`
+  반환값이 `False`면 바로 다음 후보로 넘어가도록 하고, 추가로
+  `on_progress(message)` 콜백을 받아 "어느 네트워크를 시도 중인지/왜
+  실패했는지"를 그때그때 보고하도록 변경. `smart_glass_server.py`가 이
+  콜백을 `banner_print`에 연결해 `[Wi-Fi] connecting to ...`/`rejected by
+  the Wi-Fi driver ...`/`timed out ...`/`connected to ...` 형태로
+  콘솔에 바로 보이게 했다.
+- **검증 결과**: 로컬 단위 테스트 3개 추가(`test_driver_rejection_*`,
+  `test_on_progress_reports_each_attempt_and_outcome`) 포함 76개 전부
+  통과. 실기기에서 `run_wifi.py`를 재실행했을 때 이 메시지들이 실제로
+  그대로 출력됨을 확인했다.
+
+### L-2. 집 Wi-Fi 연결 자체는 간헐적으로 실패함 — 원인 미확정, 재현만 확인
+
+- **확정된 것**: 같은 `wifi_credentials.py`(수정 없음)로 연속 3회
+  `run_wifi.py`를 실행한 결과 **2회 성공, 1회 실패**했다(실패 시
+  `[Wi-Fi] 'SK_WiFiGIGA3A00_2.4G' rejected by the Wi-Fi driver ...` →
+  핫스팟 후보도 거부 → `OSError` 발생, 보드 자체는 멈추지 않고 깔끔하게
+  `cleanup done`까지 진행됨). 즉 비밀번호 자체는 맞을 가능성이 높다
+  (완전히 틀렸다면 매번 실패해야 하는데 그렇지 않았다).
+- **아직 모르는 것**: 왜 간헐적으로 거부되는지는 확인하지 못했다. 짧은
+  시간 안에 반복적으로 연결을 시도한 것(이번 진단 포함) 자체가 공유기의
+  일시적인 재인증 제한을 유발했을 가능성을 의심하고 있으나, 이는 가장
+  그럴듯한 가설일 뿐 증명하지는 못했다. 신호 강도(-68dBm, 보통 수준)나
+  보드 Wi-Fi 드라이버의 특성일 수도 있다.
+- **사용자에게 안내한 완화책**: 실패해도 보드가 멈추지 않고 어느
+  네트워크가 왜 실패했는지 콘솔에 바로 나오므로(L-1), 실패 시 그냥 한 번
+  더 실행하면 대부분 된다 — 추측성 "원인 수정"은 하지 않았다.
+
+### L-3. UDP 자동 탐색이 집 Wi-Fi(`/24`)에서 구조적으로 불가능 — 수동 고정 IP로 자동 전환하도록 수정
+
+- **증상**: 집 Wi-Fi(192.168.45.0/24, 호스트 253개)는
+  `config.MOUSE_UDP_MAX_SCAN_HOSTS`(64) 상한을 넘어서, 자동 탐색이
+  `ValueError`를 던지고 그대로 마우스 제어가 꺼진 채 끝났다(웹서버/AI는
+  K-2 방어 코드 덕분에 계속 동작 — 실기기에서 처음 확인).
+- **사용자 결정**: 집 Wi-Fi에서는 수동 고정 IP(`MOUSE_UDP_HOST`)를 쓰기로
+  결정함(핫스팟처럼 작은 서브넷에서는 기존 자동 탐색을 그대로 유지).
+- **수정 위치**: `firmware/transport.py`의 `create_transport()` — 자동
+  탐색이 서브넷 크기 때문에 실패(`ValueError`)하면, `udp_host`가 설정돼
+  있으면 예외를 던지는 대신 고정 IP `UdpTransport`로 자동 전환하도록
+  변경(설정돼 있지 않으면 기존처럼 예외). `config.py`의 `MOUSE_UDP_HOST`
+  기본값을 핫스팟 예시 주소(`172.20.10.3`)에서 집 Wi-Fi에서 확인한 Mac의
+  실제 IP(`192.168.45.62`)로 갱신.
+- **검증 결과**: 로컬 단위 테스트 2개 추가
+  (`test_falls_back_to_fixed_host_when_subnet_too_large_for_scan`,
+  `test_raises_when_subnet_too_large_and_no_fixed_host_configured`) 포함
+  78개 전부 통과. 실기기에서 `run_wifi.py` 재실행 시 `[UDP] Fixed target:
+  192.168.45.62:9000`이 출력되고, Mac dry-run 브리지에 실제 손 제스처로
+  발생한 `EVENT MOVE`/`EVENT CLICK`이 연속 수신됨을 확인 — **집 Wi-Fi에서
+  Wi-Fi 연결+웹서버+AI+UDP 마우스 제어가 README 그대로의 실행 경로로
+  종단간 성공한 첫 사례.**
+
+### L-4. 배포·정리 상태
+
+- `firmware/wifi.py`, `firmware/smart_glass_server.py`,
+  `firmware/transport.py`, `firmware/config.py` 수정분을
+  `/sdcard/smart_glass/`에 배포, 보드에서 직접 계산한 SHA-256으로 로컬과
+  바이트 일치 확인 완료.
+- 진단 중 포트 9000을 점유하고 있던, `--dry-run` 없이 떠 있던 Mac
+  브리지 프로세스(PID 53826, 약 26분째 실행 중)를 발견해 중지했다 —
+  사용자가 이전에 직접 실행해 둔 것일 수 있어 투명하게 보고함.
+- `시연용_README.md`를 이번에 확인된 실제 동작(집 Wi-Fi 우선 시도,
+  `[Wi-Fi]`/`[UDP]` 콘솔 메시지, 서브넷 크기별 UDP 목적지 결정 방식, 집
+  Wi-Fi 간헐적 실패 시 재실행 안내)에 맞춰 갱신했다.
+- Git 커밋/푸시는 수행하지 않았다(지시 사항).

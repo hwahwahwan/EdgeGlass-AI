@@ -182,6 +182,16 @@ def create_transport(kind, uart=None, udp_host=None, udp_port=None,
     ``udp_host``/``udp_port`` stay the manual fallback: set
     udp_auto_discover=False to go back to exactly the old fixed-address
     behavior with no other code changes.
+
+    If auto-discovery is on but the connected network's subnet has more
+    host addresses than ``udp_max_scan_hosts`` (confirmed real-hardware
+    case 2026-10-23: a home router's /24, 253 hosts, versus the default
+    cap of 64), this now falls back to the fixed-IP UdpTransport using
+    ``udp_host``/``udp_port`` instead of raising and leaving mouse control
+    disabled for the whole run -- matching config.py's own documented
+    "자동 탐색이 안 되는 환경의 수동 대안" intent for MOUSE_UDP_HOST. It
+    still raises if no udp_host is configured either, since there is then
+    truly nothing usable to fall back to.
     """
     if kind == "uart":
         return UartTransport(uart=uart)
@@ -192,13 +202,23 @@ def create_transport(kind, uart=None, udp_host=None, udp_port=None,
                     "udp auto-discovery requires udp_discovery_ip and "
                     "udp_discovery_netmask (the board's own ifconfig)"
                 )
-            return AutoDiscoverUdpTransport(
-                udp_discovery_ip, udp_discovery_netmask, udp_port,
-                max_scan_hosts=udp_max_scan_hosts,
-                retry_attempts=udp_retry_attempts,
-                retry_delay_ms=udp_retry_delay_ms,
-                socket_module=socket_module,
-            )
+            try:
+                return AutoDiscoverUdpTransport(
+                    udp_discovery_ip, udp_discovery_netmask, udp_port,
+                    max_scan_hosts=udp_max_scan_hosts,
+                    retry_attempts=udp_retry_attempts,
+                    retry_delay_ms=udp_retry_delay_ms,
+                    socket_module=socket_module,
+                )
+            except ValueError:
+                if not udp_host:
+                    raise
+                return UdpTransport(
+                    udp_host, udp_port,
+                    retry_attempts=udp_retry_attempts,
+                    retry_delay_ms=udp_retry_delay_ms,
+                    socket_module=socket_module,
+                )
         if not udp_host or not udp_port:
             raise ValueError("udp transport requires udp_host and udp_port")
         return UdpTransport(

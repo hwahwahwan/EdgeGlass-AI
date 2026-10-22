@@ -320,6 +320,29 @@ class CreateTransportAutoDiscoverTests(unittest.TestCase):
         self.assertIsInstance(built, transport.UdpTransport)
         built.close()
 
+    def test_falls_back_to_fixed_host_when_subnet_too_large_for_scan(self):
+        # Real-hardware finding 2026-10-23: a home router's /24 (253 hosts)
+        # exceeds the default 64-host scan cap, so auto-discovery can never
+        # work there. config.py documents MOUSE_UDP_HOST as the manual
+        # fallback for exactly this case -- create_transport() must actually
+        # use it instead of just raising and leaving mouse control disabled.
+        transport = _fresh_transport_import()
+        built = transport.create_transport(
+            "udp", udp_host="127.0.0.1", udp_port=_free_udp_port(),
+            udp_auto_discover=True,
+            udp_discovery_ip="127.0.0.1", udp_discovery_netmask="255.255.255.0",
+        )
+        self.assertIsInstance(built, transport.UdpTransport)
+        built.close()
+
+    def test_raises_when_subnet_too_large_and_no_fixed_host_configured(self):
+        transport = _fresh_transport_import()
+        with self.assertRaises(ValueError):
+            transport.create_transport(
+                "udp", udp_port=9000, udp_auto_discover=True,
+                udp_discovery_ip="127.0.0.1", udp_discovery_netmask="255.255.255.0",
+            )
+
 
 # ================================================================
 # mac/mac_mouse_bridge.py: diagnostics + discovery reply

@@ -426,7 +426,10 @@ def main(transport_kind=None, enable_web=None):
             except ImportError:
                 wifi_networks = []
             try:
-                wlan, ifconfig, connected_ssid = wifi.connect_if_needed(wifi_networks)
+                wlan, ifconfig, connected_ssid = wifi.connect_if_needed(
+                    wifi_networks,
+                    on_progress=lambda msg: banner_print("[Wi-Fi] " + msg),
+                )
             except OSError as error:
                 banner_print("[Wi-Fi] Connection failed: %s" % (error,))
                 raise
