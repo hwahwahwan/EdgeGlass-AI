@@ -71,6 +71,21 @@ WEB_PORT = 8060
 WEB_FRAME_WIDTH = 640
 WEB_FRAME_HEIGHT = 480
 WEB_JPEG_QUALITY = 50
+# Minimum ms between /stream MJPEG frames. Real-hardware finding 2026-10-23
+# (docs/WORK_TRACKER.md): encode_jpeg() (img.compress()) runs synchronously
+# in the same single-threaded loop as hand_det/handkp_det inference and
+# gesture_controller.update(); baseline AI-only frame time on this board is
+# already ~90-95ms, and a JPEG encode (worse yet on the frequent
+# "Compression Failed" retry path) adds enough extra, irregular delay to
+# this shared loop to push many frames past gesture_controller.py's
+# wall-clock confirm windows (click_confirm_ms=90, fist_confirm_ms=180),
+# which real production logs showed correlating with spurious CLICK
+# triggers. Throttling how often a new frame is even encoded -- instead of
+# every loop iteration the network can keep up with -- directly reduces how
+# often the AI loop takes that hit, without touching any gesture-recognition
+# code. (This was already a planned WebState.frame_interval_ms field; it
+# was simply never wired up to anything -- see WebState below.)
+WEB_STREAM_MIN_INTERVAL_MS = 200
 
 AI_RGB888P_SIZE = [640, 360]
 DISPLAY_MODE = "auto"
@@ -249,7 +264,7 @@ class WebState:
         self.active = None          # 현재 요청 처리 중인 ClientSession
         self.streaming = False      # /stream 멀티파트 모드인지
         self.last_frame_sent_ms = 0
-        self.frame_interval_ms = 0  # 0이면 매 루프마다 보냄
+        self.frame_interval_ms = WEB_STREAM_MIN_INTERVAL_MS  # 0이면 매 루프마다 보냄
         self._stream_frame_count = 0
         self._stream_start_ms = 0
 
@@ -303,7 +318,17 @@ class WebState:
                     session.close()
                     self.active = None
                     return
+                now_ms = time.ticks_ms()
+                if (self.frame_interval_ms > 0
+                        and time.ticks_diff(now_ms, self.last_frame_sent_ms) < self.frame_interval_ms):
+                    # Not time for the next MJPEG frame yet. Skip the JPEG
+                    # encode this loop iteration (state stays
+                    # "stream_wait_frame") so the AI/gesture loop gets
+                    # uninterrupted frames in between -- see
+                    # WEB_STREAM_MIN_INTERVAL_MS above for why this matters.
+                    return
                 jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
+                self.last_frame_sent_ms = now_ms
                 self._stream_frame_count += 1
                 if self._stream_frame_count <= 3 or self._stream_frame_count % 10 == 0:
                     elapsed_ms = time.ticks_diff(time.ticks_ms(), self._stream_start_ms)

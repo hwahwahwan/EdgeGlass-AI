@@ -5,8 +5,9 @@ imports nothing from that project and does not touch UART2, the camera, or
 Wi-Fi. Safe to run on its own; does not modify any existing demo code.
 
 Wiring (7-pin header, GND/VCC/SCK/SDA/RES/DC/BLK only -- confirmed against
-the real board's current FPIOA state, see experiments/lcd_test/README.md
-for the full verification log and what is still unverified):
+the real board's current FPIOA state, see archive/st7789_lcd/README.md
+(archived here after this LCD was replaced by the VLT-OL016 OLED) for the
+full verification log and what is still unverified):
 
     LCD pin   K230D-Zero pin   Notes
     -------   --------------   -----
@@ -56,11 +57,22 @@ LCD_WIDTH = 240
 LCD_HEIGHT = 240
 SPI_BAUDRATE = 20 * 1000 * 1000  # conservative; raise later once verified
 
-BLK_ACTIVE_LOW = True  # flip to True if the backlight is inverted
+BLK_ACTIVE_LOW = False  # flip to True if the backlight is inverted
 
 
-def _make_pin(fpioa, pin_num, pull=Pin.PULL_NONE):
-    fpioa.set_function(pin_num, getattr(FPIOA, "GPIO%d" % pin_num))
+def _make_pin(fpioa, pin_num, pull=Pin.PULL_NONE, fpioa_pu=None):
+    # The official example (examples/03-Machine/spi_lcd_show.py) sets the
+    # reset pin's pull-up at the FPIOA mux level itself
+    # (fpioa.set_function(pin, func, pu=1)), not only via the Pin()
+    # constructor's pull= kwarg. If that FPIOA-level pull matters on this
+    # chip, a RES pin without it could float/glitch low and leave the
+    # ST7789 stuck in reset -- SPI_LCD() still constructs and lcd.show()
+    # still "succeeds" with no exception, but nothing ever reaches the
+    # panel. Mirroring the official pattern here to test that hypothesis.
+    if fpioa_pu is not None:
+        fpioa.set_function(pin_num, getattr(FPIOA, "GPIO%d" % pin_num), pu=fpioa_pu)
+    else:
+        fpioa.set_function(pin_num, getattr(FPIOA, "GPIO%d" % pin_num))
     return Pin(pin_num, Pin.OUT, pull=pull, drive=15)
 
 
@@ -76,7 +88,7 @@ def init_display():
     pin_dc = _make_pin(fpioa, PIN_DC)
     pin_dc.value(1)
 
-    pin_rst = _make_pin(fpioa, PIN_RES, pull=Pin.PULL_UP)
+    pin_rst = _make_pin(fpioa, PIN_RES, pull=Pin.PULL_UP, fpioa_pu=1)
     pin_cs_dummy = _make_pin(fpioa, DUMMY_CS_PIN)
     pin_cs_dummy.value(1)
 
