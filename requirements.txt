@@ -1,3 +1,7 @@
 # mac_mouse_bridge.py dependencies (install on macOS only)
 pyserial
 pyobjc-framework-Quartz
+
+# display/ PC-side virtual OLED test dependency (renders tests/*.png previews;
+# not needed on the board itself)
+Pillow

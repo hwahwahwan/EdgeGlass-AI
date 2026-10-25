@@ -28,6 +28,7 @@
 | 10-21 오후 | 기존 단독 `main.py`는 보존하고, 3채널 카메라·웹·AI·OSD를 한 루프에 묶은 `smart_glass_server.py`로 모듈화했다. 실기기 단계 검증 중 MediaManager/Display 충돌과 HTTP bind를 해결했다. | `8fd7c89`, `cba31d6`, `791d3f5`, `51ce689` |
 | 10-22 | UART와 Wi-Fi UDP 전송을 공통 transport로 분리했다. 실행 프로필의 CanMV import 오류 및 종료 시 DRAG 버튼 고착을 보완했다. | `a7e4565`, `447cb94` |
 | 10-23 | 고정 IP 의존을 `@HELLO/@ACK` 자동 탐색으로 대체하고, 집 Wi-Fi 우선/핫스팟 폴백을 넣었다. MicroPython `decode` 호환성 문제를 고쳤다. 현재는 JPEG/제스처 품질 회귀를 진단 중이다. | `7ceda8d`, `25452f0`, `5cb0e66`, `87ff5c7` 및 미커밋 변경 |
+| 10-23 | 기존 GMT130(ST7789) LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로 교체하기로 하고, `firmware/`와 완전히 분리된 `display/`에서 독립 개발을 시작했다. 실물이 없어 PC 시뮬레이션·단위 테스트만 완료, 실기기 검증은 하지 못했다. | 미커밋 변경(`display/`); 근거는 본 문서 4-3 |
 
 ### 브랜치와 중복 커밋
 
@@ -143,6 +144,179 @@ CanMV 실행 환경이 실행 파일의 디렉터리를 `sys.path`에 자동 등
   이력과 서술을 잃거나 중복시킬 위험이 있고, 스킬 자체를 특정 프로젝트 구조에
   종속시키지 않는 것이 범용성에 맞기 때문이다.
 
+### 4-3. `display/` OLED(VLT-OL016) — 드라이버/핀 선택 근거 (실기기 미검증)
+
+GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
+교체하기로 하고 `firmware/`와 완전히 분리된 `display/`에서 독립 개발했다.
+실물이 없어 아래는 전부 PC 시뮬레이션·단위 테스트 수준이며, 실기기 검증은
+하지 못했다(문서 6번 참고).
+
+- **CanMV의 `framebuf`/`machine.I2C` API 호환성**: 캐시된 CanMV K230
+  MicroPython 스텁(`machine.pyi`, `framebuf.pyi`)을 조회해, `framebuf.FrameBuffer`에
+  `MONO_VLSB`가 있고 `machine.I2C`가 `writeto(addr, buf, stop)`/
+  `writevto(addr, nitems, stop)`를 표준 MicroPython과 동일한 시그니처로
+  제공함을 확인했다(확인됨 — 스텁 시그니처 대조. 실제 동작은 미확인). 이를
+  근거로 MicroPython 공식 SSD1306 드라이버
+  (https://github.com/micropython/micropython-lib/blob/master/micropython/drivers/display/ssd1306/ssd1306.py)를
+  거의 수정 없이 포팅하기로 했다.
+- **공식 K230 CanMV SSD1306 예제 발견**: 캐시된 예제에서
+  `examples/03-Machine/i2c_ssd1306.py`를 찾았다 — `fpioa.set_function(11,
+  FPIOA.IIC2_SCL)`, `fpioa.set_function(12, FPIOA.IIC2_SDA)`, `I2C(2,
+  freq=400*1000)` 패턴(이 공식 예제 자체는 framebuf 드라이버 대신 저수준
+  명령을 직접 보낸다). `examples/03-Machine/touch_user.py`도 I2C2에
+  `scl=11, sda=12`를 써서 핀 선택을 교차 확인했다. FPIOA/I2C 핀·id 선택은
+  이 공식 예제를 그대로 따르고, 그림 그리기는 더 풍부한 micropython-lib의
+  framebuf 기반 드라이버를 쓰기로 했다 — 사용자가 요청한 text/line/pixel
+  등 다양한 드로잉이 저수준 명령 방식보다 훨씬 적은 코드로 충족되기 때문.
+  참고: https://www.kendryte.com/k230_canmv/en/v1.3/api/machine/K230_CanMV_I2C_API_Manual.html ,
+  https://www.kendryte.com/k230_canmv/en/main/example/peripheral/fpioa.html
+- **드라이버 포팅 범위**: `SSD1306`/`SSD1306_I2C`의 명령 시퀀스·
+  `write_cmd`/`write_framebuf`는 upstream과 동일하게 유지하고, CanMV 전용
+  코드(FPIOA 핀 설정, I2C 객체 생성)는 드라이버 밖(`display/src/oled_device.py`)으로
+  분리했다 — 실기기에서 문제가 생겼을 때 "포팅 버그"와 "이 패널/펌웨어
+  고유 문제"를 구분하기 쉽게 하기 위함.
+- **`hand_renderer.py`를 순수 Python으로 분리**: 실기기 없이도 좌표 변환·
+  정규화·클램핑 로직을 `machine`/`framebuf` 없이 PC에서 모킹 없이 단위
+  테스트하기 위해서다. `display_ui.py`도 canvas를 덕 타이핑으로만 요구해,
+  실제 SSD1306과 PC용 `VirtualOLED`가 같은 코드 경로를 타도록 했다.
+- **기존 코드 참조(읽기 전용)**: `firmware/ui.py`의 `_SKELETON_CONNECTIONS`
+  (21관절, palm-arc 없는 20개 연결선)를 확인하고 `hand_renderer.py`에
+  동일한 리스트를 복제했다(import 아님). `firmware/`·`mac/`·최상위 문서
+  전체를 grep해, 선택한 I2C 핀(GPIO11/12)이 기존 UART2(고정 보드 핀
+  44/45)나 보관된 ST7789 LCD 테스트 핀(GPIO14/15/16/17/20/21)과 겹치지
+  않음을 확인했다(확인됨).
+- **상태 표시줄 레이아웃이 참고 목업과 다른 이유 (해결됨)**: 목업은 하단에
+  "MOVE    FPS 8.5    HAND OK"(약 27자) 한 줄을 보여줬지만,
+  `framebuf.FrameBuffer.text()`는 고정 8×8 비트맵 폰트만 제공해 128px에
+  한 줄 최대 16자다(확인됨 — 스텁/표준 framebuf 동작 기준). 폰트 축소는
+  기각했고(크기 조절 API 없음, 커스텀 폰트 렌더러는 범위 밖), 제스처
+  라벨 5자 + FPS 4자 + 손인식여부 1자(약 12자)로 압축하는 방식을
+  채택해 `_draw_status_bar()`에 구현했다. 코드 레벨(`test_display_ui.py`)로
+  상태줄이 픽셀을 켜는 것은 확인했으나, 실제 패널 가독성은 미검증이다.
+- **합성 "주먹" landmark가 정규화 후 펼친 손과 뚜렷이 안 구분됨 (부분
+  해결/미해결)**: `hand_demo.py`의 주먹 좌표가 `layout_skeleton()`의
+  bounding-box 확대·축소 후에도 펼친 손과 크게 달라 보이지 않았다. 원인은
+  가설 — 손허리손가락관절(MCP)은 실제 주먹에서도 크게 움직이지 않아
+  바운딩 박스가 여전히 넓게 잡히고, 정규화가 전체를 다시 화면 가득
+  확대하면서 "손가락이 짧아진" 효과가 시각적으로 희석되는 것으로 추정했으나
+  미확인이다. 손가락 끝(TIP) 좌표를 손목 쪽으로 더 당기는 조정으로 부분
+  개선(선이 교차·꺾이는 형태로는 구분됨)했지만, 완전히 뭉친 실루엣은
+  아니다. 렌더러 자체는 "꺾인 토폴로지도 예외 없이 그려짐"만 단위
+  테스트(`test_fist_hand_also_lays_out_without_error`)로 확인했고, 손으로
+  만든 합성 좌표의 한계로 판단해 낮은 우선순위로 미해결 상태로 남겼다 —
+  시각적 "주먹다움"은 실제 AI 모델 출력으로 재검증이 필요하다.
+- **PC 가상 렌더러(`VirtualOLED`)의 상태 텍스트가 흰 블록으로만 보이던
+  문제 (해결됨)**: 생성된 PNG의 하단 상태 줄(`MOVE`, `8.5` 등)이 글자가
+  아니라 속이 찬 흰 사각형으로 렌더링됐다. 원인은 확인됨 —
+  `tests/virtual_oled.py`의 `VirtualOLED.text()`가 애초에 "글자당
+  `fill_rect`로 속 찬 사각형을 그리는" 플레이스홀더였고, 실제
+  `framebuf.FrameBuffer.text()`의 8×8 비트맵 폰트를 흉내 낸 것이 아니었다
+  (파일 docstring에도 "NOT a pixel-accurate framebuf reimplementation"으로
+  명시돼 있었음). MicroPython 업스트림 GitHub 소스
+  (`extmod/font_petme128_8x8.h`, 96글리프·MIT 라이선스·Damien P. George;
+  `extmod/modframebuf.c`의 `framebuf_text()`)를 `curl`로 직접 받아, 폰트
+  바이트 테이블과 렌더링 알고리즘(컬럼 단위, LSB가 맨 위 픽셀인 비트 순서,
+  글자당 8px, 32~127 범위 밖 문자는 127번 글리프로 대체)을 그대로 이식해
+  해결했다. **소스 코드 레벨로 검증함** — CanMV의 `framebuf` 모듈이
+  upstream 구현을 수정 없이 그대로 포함한다는 전제(근거: `framebuf.pyi`
+  스텁 API 표면이 upstream과 동일) 하에서만 실제 패널과 일치하며, CanMV
+  자체 C 소스 대조나 실기기 육안 비교는 못했다(실물 없음). 재생성한 PNG
+  (`examples/output/*.png`, 128×64 원본 해상도 `*_native_128x64.png`
+  포함)에서 `MOVE`/`DRAG`/`CLICK`/`STOP`/`8.5`/`H`/`-` 글자가 육안으로
+  읽힌다.
+- **손 관절 점이 3×3 사각형이라 너무 크고 서로 뭉쳐 보이던 문제
+  (해결됨)**: `display_ui.py`의 `_draw_joint()`가 관절마다 3×3 채워진
+  사각형을 그려서, 손가락 끝처럼 관절끼리 가까운 구간에서 사각형끼리
+  뭉쳐 보였다. 단일 픽셀은 6배 확대 미리보기에서도 거의 안 보일 것으로
+  판단해 처음에 3×3을 택했는데 실제로 과했다. 완전한 1×1 픽셀은
+  연결선(1px)과 구분이 안 될 것으로 보고 대신 2×2로 축소했다
+  (`fill_rect(x-1, y-1, 2, 2, 1)`, 화면 밖 클램핑은 유지). 재생성한 PNG에서
+  21개 관절점이 이전보다 서로 분리돼 보임을 육안으로 확인했다(점 크기
+  자체를 검증하는 자동 테스트는 없음). `display/` 단위 테스트 29개, 최상위
+  프로젝트 테스트 78개 모두 영향 없이 통과.
+- **손 스켈레톤이 화면에 비해 너무 작고 가늘게 보이던 문제 (해결됨)**:
+  사용자가 지적한 뒤 원인을 좌표 정규화 수식·확대 비율·테스트용 관절
+  데이터 세 가지로 나눠 분리 확인했다. `hand_renderer.layout_skeleton()`의
+  정규화 수식(`scale = min(usable_w/span_x, usable_h/span_y)`, 종횡비
+  보존 contain 방식)과 `config.SKELETON_MARGIN_PX=2`는 **원인이 아님
+  (확인됨)** — 둘 다 의도대로 정확히 동작했고 여백은 무시할 수준이었다.
+  실제 원인은 **확인됨** — `examples/hand_demo.py`의 테스트용 합성 관절
+  데이터(`_open_hand()`)의 바운딩박스 비율이 70:112≈0.62(세로로 긴
+  모양)인데, 스켈레톤 영역은 124:50≈2.48(가로로 넓은 landscape)이라
+  `layout_skeleton()`이 종횡비를 지키며 더 작은 배율(세로 기준)에
+  맞추다 보니 세로는 100% 채워도 가로는 약 26%만 채워졌던 것 — 알고리즘이
+  아니라 입력 테스트 데이터의 모양이 landscape 패널과 안 맞았던 것이
+  원인이다. 구조적으로 스켈레톤 영역(2.48:1)과 일반적으로 편 손 모양
+  (1.0~1.3:1)의 비율 차이 때문에, 손의 실제 비율을 왜곡하지 않는 한 가로
+  폭을 100% 채우는 것은 물리적으로 불가능하다는 점도 확인했다. (기각)
+  `layout_skeleton()`에서 x/y축에 다른 배율을 곱해 강제로 채우는 방법 —
+  손의 실제 비율을 왜곡해 사용자가 명시한 "실제 손의 비율 유지" 요구에
+  위배되므로 채택하지 않음. (채택) `_open_hand()`/`_fist_hand()`의 합성
+  좌표를 손가락이 더 옆으로 퍼진(엄지·새끼손가락이 더 바깥으로 뻗은)
+  형태로 조정 — 각 손가락 내부 관절 간격·상대 비율은 그대로 두고 "손가락을
+  넓게 편" 더 현실적인 포즈를 선택한 것이라 왜곡이 아니다. 결과:
+  `_open_hand()` 바운딩박스 비율 0.62→1.23, `_fist_hand()` 0.94→1.31,
+  스켈레톤 영역(124×50 usable) 기준 실제 렌더 가로폭이 열린 손
+  32px→62px, 주먹 31px→66px로 약 2배 증가(세로는 둘 다 이미 50px로
+  최대치였으므로 변화 없음) — `hand_renderer.layout_skeleton()`을 직접
+  호출해 전/후 수치를 코드로 재계산해 **검증함**. 재생성한 PNG에서도
+  육안으로 확인. 기존에 기록된 "주먹이 펼친 손과 뚜렷이 안 구분됨" 문제는
+  이번 수정으로 해결되지 않았고 여전히 미해결로 남아 있다.
+- **`DisplayUI`에 `joint_size` 옵션 추가 (2×2 vs 3×3 비교 지원)**:
+  사용자가 2×2(기존 기본값)와 3×3 관절 점 버전을 같은 손 데이터로 나란히
+  비교하고 싶어해서, `_draw_joint()`에 하드코딩돼 있던 2를
+  `DisplayUI.__init__(..., joint_size=2)`의 인스턴스 속성으로 분리했다
+  (기본값 2로 기존 동작과 동일하게 유지, 하위 호환). 동시에
+  `examples/hand_demo.py`가 생성하는 PNG 시나리오를 26장 → 8장(열린 손
+  joint_size=2/3 비교 2개 + 주먹 1개 + 손가락 모으는 동작 중간 프레임
+  1개, 각각 확대+원본 해상도)으로 대폭 축소했다 — 사용자가 "PNG 너무
+  많이 만들지 말고 2~3장만"이라고 명시적으로 요청했기 때문. `display/`
+  단위 테스트 29개 전부 통과(기존 테스트는 `joint_size` 미지정이라 기본값
+  2 경로를 계속 검증).
+- **실제 AI 추론 루프 연결 방법 분석 (코드 변경 없는 리서치)**: `display/`를
+  실제 `firmware/` 손 추적 결과에 연결하기 전, 연결 지점·형식·성능 영향을
+  코드 레벨로 조사했다.
+  - `display_ui.py`의 `_draw()`는 매 `update()` 호출마다 인자로 받은
+    landmarks로 스켈레톤을 다시 계산해 그리며(캐싱 없음), `gesture` 인자는
+    하단 상태 텍스트에만 쓰이고 스켈레톤 렌더링과는 무관함을 확인함
+    (확인됨) — "제스처별 고정 손 모양" 로직은 존재하지 않는다.
+  - `firmware/hand_tracker.py`의 `HandTracker.run(img)`가 반환하는
+    `points`는 (x,y) 튜플 리스트가 아니라 `numpy.int16` flat 배열
+    (`[x0,y0,x1,y1,...,x20,y20]`, 길이 42)이고, `firmware/ui.py`/
+    `gesture_controller.py` 전체가 `points[i*2]`/`points[i*2+1]`로
+    접근함을 확인(확인됨). 좌표 공간 `AI_RGB888P_SIZE=[640,360]`은
+    `display/config.py`의 `AI_FRAME_WIDTH/HEIGHT`와 이미 일치하지만,
+    `display/hand_renderer.landmarks_bounds()`는 (x,y) 튜플 21개 리스트를
+    기대하므로 연결 시
+    `[(points[i*2], points[i*2+1]) for i in range(21)]` 형태 변환이
+    필요함을 확인.
+  - 연결 대상은 `firmware/smart_glass_server.py`(main.py는 CLAUDE.md상
+    보존 대상이라 제외)로 특정(확인됨, 코드 레벨) — 초기화부(tracker 생성
+    근처, 새 `FEATURE_DISPLAY_OLED` 플래그로 기존 `FEATURE_DISPLAY_OSD`와
+    독립적으로 OLED 리소스 생성)와 메인 루프(`tracker.run()` 직후, 손
+    있음/없음 두 분기 모두). `action`은 이미 "MOVE"/"CLICK"/"DRAG"/"STOP"
+    문자열로 나와 별도 변환이 필요 없음을 확인.
+  - **통합 장애 요인 발견(미해결)**: `display/config.py`가 `import
+    config`로 임포트되는데, CLAUDE.md의 flat 배포 규칙대로 `display/`를
+    `firmware/`와 같은 `/sdcard/smart_glass/`에 평탄화하면 기존
+    `firmware/config.py`와 모듈명이 충돌함(확인됨). 다른 display/
+    파일명(`ssd1306.py`, `oled_device.py`, `hand_renderer.py`,
+    `display_ui.py`)은 충돌 없음. 해결 방법(배포 시 리네임 vs 상수 병합)은
+    아직 결정하지 않았다 — 다음 연결 작업의 선결 과제.
+  - **성능 영향 분석(가설 위주, 미확정)**: `ssd1306.py`의 `show()`가
+    128×64 전체 프레임(1024 byte)을 부분 갱신 없이 `i2c.writevto()` 1회로
+    통째로 전송함을 확인(확인됨). `I2C_FREQ=400kHz` 기준 1회 전송 시간은
+    가설 — 약 20~25ms로 추정(실측 아님). 기존에 실측된 AI 루프 속도(약
+    8~9fps, 프레임당 110~125ms)와 비교하면 `MIN_UPDATE_INTERVAL_MS=100ms`
+    스로틀이 루프 속도와 비슷해 실질적으로 거의 매 프레임 실제 갱신이
+    발생할 가능성이 높고, 추정 20~25ms는 프레임 예산의 약 15~20%에
+    해당함(가설, 미확정). `machine.I2C.writevto()`의 실기기 블로킹
+    동작은 이미 미확인으로 기록돼 있고, 현재 `display_ui.update()`의
+    try/except는 예외만 구제할 뿐 오래 블로킹되는 경우의 타임아웃/안전장치는
+    없음을 확인(확인됨 — 코드에 없음). AI 추론·UART/UDP 마우스 전송·웹
+    스트리밍이 전부 단일 스레드를 공유하므로 OLED I2C가 블로킹되면 전체
+    루프가 같이 멈출 위험이 있다(가설, 미검증).
+
 ## 5. 실패했던 접근 방식과 교훈
 
 - `wlan.connect()` 반복 호출은 연결을 빠르게 만들지 않고 handshake를 깨뜨렸다.
@@ -199,6 +373,12 @@ CanMV 실행 환경이 실행 파일의 디렉터리를 `sys.path`에 자동 등
    다음 SSID로 넘어가는 실기기 시나리오는 확인되지 않았다.
 5. **transport 예외 격리** — 코드와 테스트는 통과했으나, 의도적으로 UDP 예외를
    발생시킨 상태에서 AI/웹이 살아남는 실기기 검증은 없다.
+6. **`display/` OLED 실기기 미검증** — VLT-OL016이 실제 SSD1306 호환인지,
+   128×64/주소 0x3C가 맞는지, `machine.I2C.writevto()`가 upstream이 기대하는
+   단일 트랜잭션으로 동작하는지, GPIO11/12가 실제로 비어 있는지(`FPIOA.help()`
+   미실행) 전부 미확인이다(근거는 본 문서 4-3). PC 가상 렌더러의 폰트 렌더링은
+   **소스 코드 레벨로는 해결**(upstream MicroPython 폰트/알고리즘 포팅)됐고,
+   남은 것은 실제 패널에서의 육안 비교뿐이다.
 
 ## 7. 앞으로의 개선 과제
 
