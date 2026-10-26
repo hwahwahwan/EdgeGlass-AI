@@ -1,7 +1,12 @@
-"""Unit tests for display/src/display_ui.py, using tests/virtual_oled.py as
+"""Unit tests for firmware/display_ui.py, using tests/virtual_oled.py as
 the canvas (no hardware/mocks). Run with:
 
     cd display && python3 -m unittest discover -s tests -v
+
+display_ui.py/hand_renderer.py/display_config.py now live in firmware/
+(the single source of truth for what's deployed to the board, see
+docs/DEV_HISTORY.md) rather than display/src/ -- display/ keeps only this
+PC-side test harness, importing firmware/'s modules directly.
 """
 
 import os
@@ -9,7 +14,9 @@ import sys
 import unittest
 
 _DISPLAY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _path in [_DISPLAY_ROOT] + [os.path.join(_DISPLAY_ROOT, s) for s in ("src", "tests")]:
+_PROJECT_ROOT = os.path.dirname(_DISPLAY_ROOT)
+_FIRMWARE_ROOT = os.path.join(_PROJECT_ROOT, "firmware")
+for _path in [_FIRMWARE_ROOT, os.path.join(_DISPLAY_ROOT, "tests")]:
     if _path not in sys.path:
         sys.path.insert(0, _path)
 

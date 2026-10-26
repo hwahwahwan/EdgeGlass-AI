@@ -1,23 +1,25 @@
 """CanMV-only OLED bring-up: FPIOA + I2C init, address scan, safe SSD1306
 construction/teardown.
 
-This is the one file in display/ that imports `machine` -- hand_renderer.py
-and display_ui.py stay plain Python so they can be unit tested on a PC
-without hardware or mocks (see tests/test_oled_device.py for how *this*
-file's logic is still exercised on a PC, using fake machine/framebuf
-modules the same way this project's existing tests fake `machine` for
-firmware/transport.py -- see tests/test_wifi_mouse_transport.py).
+This is the one firmware/ module among the OLED-related files that imports
+`machine` -- hand_renderer.py and display_ui.py stay plain Python so they
+can be unit tested on a PC without hardware or mocks (see
+display/tests/test_oled_device.py for how *this* file's logic is still
+exercised on a PC, using fake machine/framebuf modules the same way this
+project's existing tests fake `machine` for transport.py -- see
+tests/test_wifi_mouse_transport.py). display/ keeps only the PC-side test
+harness (tests/, examples/) that imports these firmware/ modules directly;
+firmware/ is the single source of truth for what's deployed to the board
+(see docs/DEV_HISTORY.md 4-3).
 
-Flat-import convention: on the real board this file is deployed next to
-display_config.py and drivers/ssd1306.py flattened into one directory (see
-README.md "보드에서 실행할 테스트 파일"), matching this project's existing
-firmware/ -> /sdcard/smart_glass/ convention (see /CLAUDE.md). So the
-imports below are flat (`import display_config`, `from ssd1306 import
-SSD1306_I2C`), not package-relative. The module is named display_config,
-not config, because when display/ is wired into smart_glass_server.py the
-flat board directory also holds firmware/config.py -- two modules both
-named config.py in the same flat directory would shadow each other (see
-docs/DEV_HISTORY.md 4-3).
+Flat-import convention: deployed flat to /sdcard/smart_glass/ next to
+display_config.py, ssd1306.py, display_ui.py, hand_renderer.py and the
+rest of firmware/ (this project's existing firmware/ -> /sdcard/smart_glass/
+convention, see /CLAUDE.md). So the imports below are flat (`import
+display_config`, `from ssd1306 import SSD1306_I2C`), not package-relative.
+The module is named display_config, not config, because firmware/config.py
+already exists -- two modules both named config.py in the same flat
+directory would shadow each other (see docs/DEV_HISTORY.md 4-3).
 """
 
 import display_config as config

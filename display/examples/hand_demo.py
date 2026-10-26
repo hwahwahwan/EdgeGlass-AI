@@ -1,7 +1,8 @@
 """PC-only virtual OLED demo -- no CanMV/machine/board required.
 
-Drives display/src/display_ui.py with synthetic 21-point hand landmarks
-through tests/virtual_oled.py's VirtualOLED, and saves a small, deliberately
+Drives firmware/display_ui.py (single source of truth for what's deployed
+to the board -- see docs/DEV_HISTORY.md) with synthetic 21-point hand
+landmarks through tests/virtual_oled.py's VirtualOLED, and saves a small, deliberately
 limited set of pose scenarios (open hand, fist, fingers-closing motion) as
 both a scaled-up PNG (6x, for easy viewing) and a true 128x64 native-
 resolution PNG (*_native_128x64.png) under display/examples/output/ so
@@ -22,7 +23,8 @@ import os
 import sys
 
 _DISPLAY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _path in [_DISPLAY_ROOT] + [os.path.join(_DISPLAY_ROOT, s) for s in ("src", "tests")]:
+_FIRMWARE_ROOT = os.path.join(os.path.dirname(_DISPLAY_ROOT), "firmware")
+for _path in [_FIRMWARE_ROOT, os.path.join(_DISPLAY_ROOT, "tests")]:
     if _path not in sys.path:
         sys.path.insert(0, _path)
 

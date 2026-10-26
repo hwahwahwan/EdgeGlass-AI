@@ -2,15 +2,17 @@
 
 No machine/framebuf/I2C import here at all -- this module is plain data
 transformation (landmarks in, pixel points/lines out) so it is directly
-unit-testable on a PC with no mocks (see tests/test_hand_renderer.py).
+unit-testable on a PC with no mocks (see display/tests/test_hand_renderer.py,
+which imports this firmware/ module directly).
 
 Reuses the EXACT 21-point index layout and skeleton connection list
 already used by firmware/ui.py's draw_landmarks() (wrist=0, thumb=1-4,
 index=5-8, middle=9-12, ring=13-16, pinky=17-20; no palm-arc connections --
 firmware/ui.py doesn't draw those either, so this mirrors it rather than
 inventing a different topology). The list is duplicated here, not
-imported, because firmware/ is read-only reference material for this
-independent display/ module (see DEVELOPMENT.md "기존 코드 참조 여부").
+imported from ui.py, to keep this module's only dependency being its own
+input data (see display/DEVELOPMENT.md "기존 코드 참조 여부" for the
+original design rationale, from when this lived in display/src/).
 """
 
 NUM_LANDMARKS = 21

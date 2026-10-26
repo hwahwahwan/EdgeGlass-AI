@@ -1,4 +1,4 @@
-"""Unit tests for display/src/oled_device.py.
+"""Unit tests for firmware/oled_device.py.
 
 oled_device.py defers its `from machine import ...` / `from ssd1306
 import ...` to inside open_display() (not at module level), specifically
@@ -12,8 +12,11 @@ means:
     `framebuf` faked in sys.modules (the same way this project's existing
     tests fake `machine` for firmware/transport.py -- see
     tests/test_wifi_mouse_transport.py's _install_fake_machine()), so the
-    real display/drivers/ssd1306.py driver can run against a fake I2C bus
+    real firmware/ssd1306.py driver can run against a fake I2C bus
     instead of a mocked-out driver.
+
+oled_device.py/ssd1306.py now live in firmware/ (single source of truth
+for what's deployed to the board) rather than display/src|drivers/.
 
 Run with:
     cd display && python3 -m unittest discover -s tests -v
@@ -26,9 +29,9 @@ import types
 import unittest
 
 _DISPLAY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _path in [_DISPLAY_ROOT] + [os.path.join(_DISPLAY_ROOT, s) for s in ("src", "drivers")]:
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+_FIRMWARE_ROOT = os.path.join(os.path.dirname(_DISPLAY_ROOT), "firmware")
+if _FIRMWARE_ROOT not in sys.path:
+    sys.path.insert(0, _FIRMWARE_ROOT)
 
 import oled_device  # noqa: E402
 

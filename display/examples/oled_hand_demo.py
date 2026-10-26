@@ -1,28 +1,24 @@
-"""Board-only real-panel demo: drives DisplayUI with synthetic 21-point
-hand landmarks on the actual VLT-OL016 OLED (not the PC VirtualOLED used
-by examples/hand_demo.py). This is the first script that exercises the
-skeleton-rendering code path (hand_renderer + DisplayUI) on real hardware,
-as opposed to oled_basic_test.py which only exercises fill/text/rect.
+"""Board-only DUMMY-DATA panel demo: drives DisplayUI with synthetic
+21-point hand landmarks on the actual VLT-OL016 OLED (not the PC
+VirtualOLED used by examples/hand_demo.py, and not the real AI loop --
+see firmware/smart_glass_server.py for that, which is the real,
+camera-driven integration, verified on hardware 2026-10-26). Useful for
+checking the skeleton/joint-dot/status-bar rendering on the real panel
+without needing the camera/AI stack running.
 
-Not wired up to firmware/'s real hand_tracker.py yet -- this uses the same
-hand-shaped synthetic landmark generators as examples/hand_demo.py
-(duplicated here, not imported, since this file is deployed flat to
-/sdcard/display/ and hand_demo.py depends on Pillow/VirtualOLED which
-don't exist on the board) so the skeleton layout/joint-dot/status-bar code
-can be checked on the real panel before the real AI loop is connected (see
-docs/DEV_HISTORY.md 4-3 for the connection-point analysis).
-
-Deploy flattened next to the other display/ files (see README.md "보드에서
-실행할 테스트 파일"), e.g. to /sdcard/display/, then run this file directly
-from the CanMV IDE. Runs forever, cycling through open hand -> closing ->
-fist -> opening -> no-hand, printing which pose is showing each frame;
-stop from the IDE when done watching.
+Deploy flattened next to the other firmware/ files (oled_device.py,
+display_ui.py, hand_renderer.py, display_config.py, ssd1306.py are now
+part of firmware/, the single source of truth for what's deployed to the
+board -- see docs/DEV_HISTORY.md), i.e. to /sdcard/smart_glass/, then run
+this file directly from the CanMV IDE. Runs forever, cycling through open
+hand -> closing -> fist -> opening -> no-hand, printing which pose is
+showing each frame; stop from the IDE when done watching.
 """
 
 import sys
 import time
 
-PROJECT_DIR = "/sdcard/display"
+PROJECT_DIR = "/sdcard/smart_glass"
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 

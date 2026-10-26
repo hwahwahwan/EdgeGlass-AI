@@ -22,9 +22,8 @@
 | 컨트롤러 | SSD1306 | `drivers/ssd1306.py`(micropython-lib 포팅, 초기화 시퀀스 무수정)로 실기기에서 화면 출력 확인(2026-10-26) — SSD1306 호환으로 사실상 확인됨 |
 | I2C 주소 | 0x3C | 실기기 `i2c.scan()`에서 `0x3C` 하나만 확인됨(2026-10-26) |
 
-컨트롤러가 SSD1306이 아닐 경우, `drivers/ssd1306.py`만 교체하면 되도록
-`src/oled_device.py`는 `SSD1306_I2C`를 **딱 한 곳**에서만 import한다(아래
-"드라이버 교체" 참고).
+컨트롤러가 SSD1306이 아닐 경우, `firmware/ssd1306.py`만 교체하면 되도록
+`firmware/oled_device.py`는 `SSD1306_I2C`를 **딱 한 곳**에서만 import한다.
 
 ## 2. 사용한 드라이버와 공식 자료
 
@@ -44,7 +43,7 @@
 시그니처로 제공하고(`machine.pyi` 캐시 스텁으로 확인), `framebuf.FrameBuffer`도
 `MONO_VLSB`를 포함해 동일한 API를 제공해서, **드라이버 로직 자체는 수정 없이
 그대로 포팅**했다. CanMV 전용 코드(FPIOA 핀 설정, I2C 객체 생성)는 드라이버
-밖(`src/oled_device.py`)으로 분리했다.
+밖(`firmware/oled_device.py`)으로 분리했다.
 
 ## 3. K230D-Zero 핀 연결표 — 실기기 연결 및 통신 확인됨 (2026-10-26)
 
@@ -55,7 +54,7 @@
 | SCL | IO_11 | I2C2 SCL (하드웨어) | 실제 배선으로 연결, `i2c.scan()`에서 장치가 잡혀 통신 확인됨 |
 | SDA | IO_12 | I2C2 SDA (하드웨어) | 위와 동일 — 실제 배선·통신 확인됨 |
 
-핀 번호는 `display/display_config.py`의 `PIN_SCL`/`PIN_SDA`/`I2C_ID`에 모여 있다.
+핀 번호는 `firmware/display_config.py`의 `PIN_SCL`/`PIN_SDA`/`I2C_ID`에 모여 있다.
 
 **다른 K230 보드 예제를 그대로 복사하지 않았다** — IO11/12는 이 프로젝트가 실제
 쓰는 "K230 CanMV" 계열의 **공식** SSD1306 예제에서 가져온 것이며, 별도로
@@ -63,64 +62,67 @@
 및 보관된 ST7789 LCD 테스트(GPIO14/15/16/17/20/21)와 충돌하지 않음을 프로젝트
 전체 grep으로 확인했다.
 
-## 4. 폴더 구조
+## 4. 폴더 구조 (2026-10-26 재구성)
+
+OLED 코드가 실제 AI 루프에 연동되어 실기기로 검증된 뒤로, 구현 모듈은
+`firmware/`로 옮겨 **단일 원본**으로 통합했다(`CLAUDE.md`의 "로컬 firmware/가
+보드에 배포되는 코드의 단일 원본" 원칙). `display/`는 이제 **PC 전용 테스트
+하네스**로만 남는다 — `firmware/`의 모듈을 직접 import해서 하드웨어 없이
+검증한다.
 
 ```text
-display/
-├── drivers/
-│   └── ssd1306.py          # micropython-lib 포팅, machine import 없음
-├── src/
-│   ├── oled_device.py      # CanMV 전용 bring-up (FPIOA/I2C), machine import는 여기만
-│   ├── hand_renderer.py    # 순수 Python: landmark -> 픽셀 좌표/선분
-│   └── display_ui.py       # DisplayUI.update(landmarks, gesture, fps) 공개 인터페이스
+firmware/                      # 실제 구현 — 보드 배포의 단일 원본
+├── display_config.py          # 핀/I2C/레이아웃/업데이트 주기 상수 (firmware/config.py와
+│                               # 모듈명 충돌을 피하려고 config.py가 아닌 이 이름을 씀)
+├── ssd1306.py                 # micropython-lib 포팅, machine import 없음
+├── oled_device.py             # CanMV 전용 bring-up (FPIOA/I2C), machine import는 여기만
+├── hand_renderer.py           # 순수 Python: landmark -> 픽셀 좌표/선분
+├── display_ui.py              # DisplayUI.update(landmarks, gesture, fps) 공개 인터페이스
+└── smart_glass_server.py      # 위 모듈들을 실제 hand_tracker.py 출력과 연결(FEATURE_DISPLAY_OLED)
+
+display/                       # PC 전용 테스트 하네스 (하드웨어 불필요)
 ├── tests/
-│   ├── virtual_oled.py     # PC용 가상 128x64 캔버스(+PNG 저장), machine import 없음
-│   ├── test_hand_renderer.py
-│   ├── test_display_ui.py
-│   └── test_oled_device.py
+│   ├── virtual_oled.py        # PC용 가상 128x64 캔버스(+PNG 저장), machine import 없음
+│   ├── test_hand_renderer.py  # firmware/hand_renderer.py를 직접 import해 테스트
+│   ├── test_display_ui.py     # firmware/display_ui.py를 직접 import해 테스트
+│   └── test_oled_device.py    # firmware/oled_device.py를 직접 import해 테스트
 ├── examples/
-│   ├── oled_basic_test.py  # 보드 전용 (I2C scan + 채우기 + 텍스트)
-│   ├── oled_hand_demo.py   # 보드 전용 (합성 손동작 더미 데이터 -> 실제 패널, AI 미연동)
-│   ├── hand_demo.py        # PC 전용 (가상 손동작 -> PNG 저장)
-│   └── output/             # hand_demo.py가 생성하는 PNG들
-├── display_config.py        # 핀/I2C/레이아웃/업데이트 주기 상수 (firmware/config.py와
-│                             # 모듈명 충돌을 피하려고 config.py가 아닌 이 이름을 씀)
-├── README.md                 (이 파일)
+│   ├── oled_basic_test.py     # 보드 전용 (I2C scan + 채우기 + 텍스트), /sdcard/smart_glass/에 배포
+│   ├── oled_hand_demo.py      # 보드 전용 (합성 손동작 더미 데이터 -> 실제 패널, AI 미연동)
+│   ├── hand_demo.py           # PC 전용 (가상 손동작 -> PNG 저장)
+│   └── output/                # hand_demo.py가 생성하는 PNG들
+├── README.md                   (이 파일)
 └── DEVELOPMENT.md
 ```
-
-실제 AI 추론 루프 연동(더미 데이터가 아닌 `firmware/hand_tracker.py`의 실시간 손
-관절)은 `display/` 바깥, `firmware/smart_glass_server.py`에 구현한다 — 아래
-"실제 AI 루프 연동" 절 참고.
 
 ## 5. 보드에서 실행할 테스트 파일
 
 CanMV는 실행 스크립트 자신의 디렉터리를 `sys.path`에 자동으로 넣지 않고,
 중첩 패키지 import도 이 프로젝트에서 검증된 적이 없다(`CLAUDE.md` 참고) —
-`firmware/`가 `/sdcard/smart_glass/`로 평탄화되는 것과 같은 방식으로,
-`display/`도 **보드에는 평탄화해서** 올려야 한다:
+`firmware/` 전체가 `/sdcard/smart_glass/`로 평탄화되어 배포된다. OLED
+모듈도 이제 `firmware/`의 일부이므로 같은 경로로 함께 배포된다:
 
 ```text
-display/display_config.py      -> /sdcard/display/display_config.py
-display/drivers/ssd1306.py     -> /sdcard/display/ssd1306.py
-display/src/oled_device.py     -> /sdcard/display/oled_device.py
-display/src/hand_renderer.py   -> /sdcard/display/hand_renderer.py
-display/src/display_ui.py      -> /sdcard/display/display_ui.py
-display/examples/oled_basic_test.py -> /sdcard/display/oled_basic_test.py
-display/examples/oled_hand_demo.py  -> /sdcard/display/oled_hand_demo.py  (더미 데이터, AI 미연동)
+firmware/display_config.py           -> /sdcard/smart_glass/display_config.py
+firmware/ssd1306.py                  -> /sdcard/smart_glass/ssd1306.py
+firmware/oled_device.py              -> /sdcard/smart_glass/oled_device.py
+firmware/hand_renderer.py            -> /sdcard/smart_glass/hand_renderer.py
+firmware/display_ui.py               -> /sdcard/smart_glass/display_ui.py
+firmware/smart_glass_server.py       -> /sdcard/smart_glass/smart_glass_server.py
+display/examples/oled_basic_test.py  -> /sdcard/smart_glass/oled_basic_test.py  (독립 bring-up 테스트)
+display/examples/oled_hand_demo.py   -> /sdcard/smart_glass/oled_hand_demo.py   (더미 데이터, AI 미연동)
 ```
 
-이 `/sdcard/display/` 경로는 **`display/`를 독립적으로 테스트할 때만** 쓴다.
-실제 AI 루프에 연동할 때는 `firmware/`와 같은 `/sdcard/smart_glass/`에
-합쳐서 배포한다 — 아래 "실제 AI 루프 연동" 절 참고.
+`oled_basic_test.py`/`oled_hand_demo.py`는 `firmware/`의 나머지(카메라/AI/
+Wi-Fi)를 켜지 않고 OLED만 독립적으로 점검하고 싶을 때 쓰는 보조 스크립트다
+— 실제 서비스 실행은 `firmware/run_uart.py`/`run_wifi.py`/`run_uart_web.py`
+(또는 `smart_glass_server.main()`)를 쓴다.
 
-(로컬 폴더 이름이 보드 경로와 같아야 한다고 가정하지 않는다 — `firmware/`와
-동일한 원칙.) 평탄화 후 CanMV IDE에서 `oled_basic_test.py`를 직접 실행한다.
-이 파일은 I2C scan → 전체 채우기(검정→흰색) → 텍스트/사각형 순으로 진행하며,
-각 단계를 콘솔에 출력한다. **실기기로 한 번도 실행해 보지 못했다** — ST7789
-LCD 때와 달리 `oled_device.open_display()`는 패널이 없거나 잘못 연결돼도
-크래시 대신 `None`을 반환하도록 설계했지만(`src/oled_device.py` 참고), 이
-설계 자체도 실기기로 증명되지는 않았다.
+`oled_basic_test.py`는 I2C scan → 전체 채우기(검정→흰색) → 텍스트/사각형
+순으로 진행하며, 각 단계를 콘솔에 출력한다. **실기기로 검증 완료**(2026-10-26,
+I2C 0x3C 감지, 화면 출력 육안 확인 — 아래 7절 참고). `oled_device.open_display()`는
+패널이 없거나 잘못 연결돼도 크래시 대신 `None`을 반환하도록 설계했다
+(`firmware/oled_device.py` 참고).
 
 ## 6. PC에서 가상 화면을 확인하는 방법
 
@@ -153,8 +155,8 @@ python3 -m unittest discover -s tests -v
 
 1. 4핀(GND/VCC/SCL/SDA)을 위 배선표대로 연결한다 — 전원 올리기 전 한 번 더
    확인(특히 VCC는 3.3V만). **완료.**
-2. `display/` 전체를 위 "보드에서 실행할 테스트 파일" 절차대로
-   `/sdcard/display/`에 평탄화해서 올린다. **완료.**
+2. `firmware/`(OLED 모듈 포함) 전체를 위 "보드에서 실행할 테스트 파일" 절차대로
+   `/sdcard/smart_glass/`에 평탄화해서 올린다. **완료.**
 3. `oled_basic_test.py`를 CanMV IDE에서 실행한다. **완료, 2회 재실행 모두
    동일하게 성공.**
 4. 콘솔의 `[OLED] i2c.scan() -> [...]` 로그를 먼저 확인한다 — **`['0x3c']`
@@ -167,13 +169,15 @@ python3 -m unittest discover -s tests -v
    계속 켜 두는 진단 스크립트(`oled_fullon_hold.py`, 무한 루프로 유지,
    `[CanMV] stop` 버튼으로 종료)로 화면이 꺼지지 않고 유지되는 것도
    별도로 확인했다.
-6. 실패하면(scan에 주소가 잡히는데도 화면이 안 나오는 경우) `drivers/ssd1306.py`의
+6. 실패하면(scan에 주소가 잡히는데도 화면이 안 나오는 경우) `firmware/ssd1306.py`의
    초기화 시퀀스가 이 패널과 안 맞을 가능성이 있다 — 이번에는 이 경우에
    해당하지 않았다.
-7. 기본 bring-up이 확인됐으므로, 다음 단계는 `src/display_ui.py`의
-   `DisplayUI`를 `oled_device.open_display()`가 반환한 객체로 생성해 실제
-   손동작 데이터로 테스트하는 것이다(아직 수행하지 않음 — `docs/DEV_HISTORY.md`
-   4-3의 연결 지점 분석 참고).
+7. 기본 bring-up 확인 후, `firmware/display_ui.py`의 `DisplayUI`를
+   `firmware/smart_glass_server.py`에서 실제 `hand_tracker.py` 출력과 연결했다
+   (`FEATURE_DISPLAY_OLED`). **이것도 실기기로 검증 완료** — 카메라로 인식한
+   실제 손 관절 21개가 OLED에서 실시간으로 움직이는 것과 하단 상태 텍스트
+   (MOVE/CLICK/DRAG/STOP)가 바뀌는 것을 사용자가 직접 확인했다(2026-10-26,
+   `docs/DEV_HISTORY.md` 4-3 참고).
 
 ## 8. 알려진 제약 및 미검증 사항
 
@@ -187,9 +191,11 @@ python3 -m unittest discover -s tests -v
 - `oled_device.open_display()`가 "패널 없음"을 크래시 없이 처리한다는 설계는
   코드 레벨 테스트(fake `machine`)로만 확인했고, 실제 I2C 버스 에러 상황에서도
   똑같이 안전할지는 실기기 확인이 필요하다.
-- `DisplayUI`(손 관절 스켈레톤 UI)는 아직 실기기에서 실행해 보지 않았다 —
-  이번에 검증한 것은 `oled_basic_test.py`의 기본 bring-up(지우기/전체 켜짐/
-  고정 텍스트)뿐이다.
+- `DisplayUI`(손 관절 스켈레톤 UI)는 실제 AI 루프(`firmware/smart_glass_server.py`,
+  `FEATURE_DISPLAY_OLED`)에 연결되어 실기기로 검증 완료(2026-10-26) — 카메라가
+  인식한 실제 손 관절이 OLED에서 실시간으로 움직이는 것을 확인했다. Wi-Fi
+  웹서버까지 동시에 켠 전체 통합 실행은 `docs/DEV_HISTORY.md`에서 진행
+  상황을 추적한다.
 - 상태 표시줄 레이아웃은 `framebuf.FrameBuffer.text()`의 고정 8×8 비트맵
   폰트(128px ÷ 8px = 한 줄 최대 16글자) 제약에 맞춰 설계값을 줄였다 — 참고
   목업 이미지의 "MOVE    FPS 8.5    HAND OK"(약 27자)는 실제 해상도에서

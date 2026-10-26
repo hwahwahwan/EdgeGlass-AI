@@ -1,7 +1,10 @@
-"""Unit tests for display/src/hand_renderer.py -- pure Python, no hardware,
+"""Unit tests for firmware/hand_renderer.py -- pure Python, no hardware,
 no mocks needed. Run with:
 
     cd display && python3 -m unittest discover -s tests -v
+
+hand_renderer.py now lives in firmware/ (single source of truth for what's
+deployed to the board) rather than display/src/.
 """
 
 import os
@@ -9,9 +12,9 @@ import sys
 import unittest
 
 _DISPLAY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _path in [_DISPLAY_ROOT, os.path.join(_DISPLAY_ROOT, "src")]:
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+_FIRMWARE_ROOT = os.path.join(os.path.dirname(_DISPLAY_ROOT), "firmware")
+if _FIRMWARE_ROOT not in sys.path:
+    sys.path.insert(0, _FIRMWARE_ROOT)
 
 import hand_renderer  # noqa: E402
 

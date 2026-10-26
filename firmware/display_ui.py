@@ -1,11 +1,14 @@
-"""Top-level display/ interface: DisplayUI.update(landmarks, gesture, fps).
+"""OLED skeleton UI: DisplayUI.update(landmarks, gesture, fps).
 
 Owns a "canvas" (anything exposing fill(c)/pixel(x,y,c)/line(x1,y1,x2,y2,c)/
 hline(x,y,w,c)/text(s,x,y,c)/show()) -- a real SSD1306_I2C
 (framebuf.FrameBuffer subclass, from oled_device.open_display()) on the
-board, or tests/virtual_oled.py's VirtualOLED on a PC. This module itself
-never imports machine/framebuf, so its drawing logic is identical and
-directly testable in both places (see tests/test_display_ui.py).
+board, or display/tests/virtual_oled.py's VirtualOLED on a PC. This module
+itself never imports machine/framebuf, so its drawing logic is identical
+and directly testable in both places (see display/tests/test_display_ui.py,
+which imports this firmware/ module directly -- firmware/ is the single
+source of truth for what's deployed to the board, display/ keeps only the
+PC-side test harness, see docs/DEV_HISTORY.md 4-3).
 
 Rate-limits how often it actually redraws (config.MIN_UPDATE_INTERVAL_MS)
 so a caller can call update() every AI frame without that dictating the

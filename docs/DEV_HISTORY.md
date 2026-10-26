@@ -416,6 +416,168 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
   패널에서 실제 손 움직임을 따라가는 스켈레톤과 하단 상태 텍스트 변화를
   직접 육안으로 확인하고 "잘됨"이라고 확인함**. 카메라+AI 추론+제스처
   판정+UART 마우스 전송+OLED가 동시에 크래시 없이 동작.
+- **OLED 모듈을 `display/`에서 `firmware/`로 이동 — 단일 원본 통합**:
+  LED 조사가 끝난 뒤 사용자가 실제 통합·배포·실행을 요청하면서, display/
+  테스트 폴더의 모듈을 실제 firmware/ 구조로 옮겨 정리해달라고 명시적으로
+  요청함. `display/display_config.py`, `display/drivers/ssd1306.py`,
+  `display/src/oled_device.py`, `display/src/hand_renderer.py`,
+  `display/src/display_ui.py` 5개 파일을 각각 `firmware/display_config.py`,
+  `firmware/ssd1306.py`, `firmware/oled_device.py`,
+  `firmware/hand_renderer.py`, `firmware/display_ui.py`로 물리적으로
+  이동(복사 아님, 중복 보관 안 함) — 선택 이유: CLAUDE.md의 "로컬
+  firmware/가 보드에 배포되는 코드의 단일 원본" 원칙과, 이 모듈들이 이미
+  `smart_glass_server.py`에서 쓰여 보드에 배포되는 상태라는 점에서 원본이
+  display/에 남아있는 게 "로컬 구조=보드 배포 구조" 원칙에 어긋났기
+  때문. 복사가 아니라 이동을 택한 이유는 두 벌을 유지보수하며 생기는
+  동기화 드리프트 위험을 피하기 위함. `display/`는 이제 PC 전용 테스트
+  하네스(`tests/`, `examples/`)만 남고, 그 테스트들은 firmware/의 모듈을
+  직접 import하도록 sys.path 설정을 변경. 영향받은 빈 디렉터리
+  (`display/src/`, `display/drivers/`)와 `__pycache__` 캐시는 정리해
+  삭제. **검증 결과**: PC 단위 테스트 29개, `examples/hand_demo.py` PC
+  데모, 최상위 프로젝트 테스트 78개 전부 재실행해 영향 없음 확인(회귀
+  없음). 보드 배포본(`/sdcard/smart_glass/`)도 전부 로컬과 바이트 단위
+  크기 일치 확인하며 재배포. 보드의 구버전 `/sdcard/display/` 디렉터리
+  (이동 전 잔재)는 삭제하고, `oled_basic_test.py`/`oled_hand_demo.py`는
+  새 경로(`/sdcard/smart_glass/`)로 재배포. `display/README.md`의 폴더
+  구조·배포 경로 설명도 새 구조에 맞춰 갱신.
+- **UART 마우스 + Wi-Fi 웹서버 동시 실행용 새 진입점
+  `firmware/run_uart_web.py` 추가**: 사용자가 "카메라+AI+OLED+UART
+  마우스"와 "+ Wi-Fi 웹서버"를 각각 별도 단계로 전력 측정하고 싶어했는데,
+  기존 `run_uart.py`(UART, 웹 끔)와 `run_wifi.py`(UDP 마우스+웹)로는
+  "UART 마우스 유지 + 웹서버 켜기" 조합이 없었음. (채택)
+  `smart_glass_server.main(transport_kind="uart", enable_web=True)`를
+  고정하는 새 얇은 진입점 파일을 기존 run_uart.py/run_wifi.py와 동일한
+  패턴으로 추가 — `smart_glass_server.py` 자체는 수정하지 않음(이미
+  transport_kind와 enable_web이 독립적으로 동작하도록 설계돼 있었고,
+  `transport.wifi_is_needed()`가 `web_server_enabled`만으로도 True를
+  반환하는 로직을 코드로 확인함). 선택 이유: 기존에 검증된 두 진입점은
+  그대로 보존하고 새 조합만 얇게 추가하는 게 "이미 성공한 기능을
+  재구현하지 않는다"는 재사용 원칙에 맞기 때문. 검증 결과: 로컬 AST 문법
+  검사 통과. 보드 배포 후 1단계(카메라+AI+OLED+UART, `run_uart.py`
+  재실행)에서 `[OLED] display ready`까지 정상 확인(전력 측정 1단계
+  진행 중, 사용자 측정 대기). 2단계(`run_uart_web.py`)는 아직 실행 전.
+- **카메라+AI+OLED+UART+Wi-Fi+웹서버 전체 조합 첫 성공 (확인됨)**: 사용자가
+  전원만으로 자동 부팅되게 설정해달라고 요청. 과거(`tools/DEPLOY.md`
+  2026-10-21 기록)에 이 조합 계열에서 `HttpServer: bind failed after 20
+  retries`나 `MediaManager.init()` 오설정으로 인한 완전 먹통 등 실패
+  사례가 있었고, OLED가 추가된 이번 전체 조합은 이번 세션에 한 번도 끝까지
+  같이 실행해 본 적이 없었다. 그래서 자동 부팅을 설정하기 전에 먼저 USB로
+  수동 실행해 이 조합이 실제로 안정적으로 도는지 검증하기로 함(전원 테스트
+  전 안전장치). `run_uart_web.py`를 USB REPL로 수동 실행한 결과, 카메라
+  (채널0 OSD+채널1 웹+채널2 AI)+AI 추론+OLED+UART2 마우스+Wi-Fi+웹서버가
+  전부 동시에 크래시 없이 정상 동작함을 확인: `[OLED] i2c.scan() ->
+  ['0x3c']`/`ready`/`display ready`; 집 Wi-Fi(`SK_WiFiGIGA3A00_2.4G`)는
+  거부됨("rejected by the Wi-Fi driver", 비밀번호 또는 보안 모드 문제로
+  추정, 미확인)되었으나 핫스팟(`i`)으로 자동 폴백 성공 — 기존 "집 Wi-Fi
+  우선, 실패 시 핫스팟 폴백" 로직이 실제로 작동함을 재확인; `[WEB] Server
+  started`, `URL: http://172.20.10.3:8060/`로 웹서버 정상 bind(과거
+  기록된 bind 실패 재발 없음); `[AI] Gesture tracking started` 후
+  `[ORCH] ACTION: STOP/MOVE` 전환과 `CLICK_DECISION`/`CLICK_TX` UART
+  패킷 송신이 지속적으로 정상 발생, 수 분 관찰 동안 멈추거나 재부팅되지
+  않고 안정적으로 유지됨. **결론**: 이 전체 조합이 이번에 처음으로
+  실기기에서 끝까지 안정적으로 동작함이 검증됐다 — OLED 추가 이후, 그리고
+  과거 bind 실패/MediaManager 행 사례 이후 처음으로 이 조합 전체가 성공한
+  사례. 이로써 자동 부팅 기본값으로 설정하기 전 안전 확인이 완료됨.
+- **전원 재인가 자동 실행 테스트 — MCP 연결 자체의 관찰자 효과 발견, 원인
+  미확정(진행 중)**: `/sdcard/boot.py`/`/sdcard/main.py`(`tools/autorun/`)를
+  배포한 뒤 사용자가 USB선을 완전히 뽑았다 다시 꽂아 전원 재인가 테스트를
+  했으나 "스크립트가 실행 안 되는 것 같다"고 보고함. Claude가
+  `canmv_connect_board`로 재연결해 로그를 본 결과 `File "<stdin>", line
+  14, in <module>` / `Exception: IDE interrupt` 트레이스백이 나타났다.
+  `<stdin>` 소스라는 점과 `line 14`가 `/sdcard/main.py`의 카운트다운 루프
+  (`time.sleep(1)`) 위치와 일치한다는 정황 근거로, boot.py/main.py 자체는
+  실행되고 있었는데 Claude의 디버그 연결이 그 순간 보드에 인터럽트를 걸어
+  멈췄을 가능성이 있다고 봤다(가설, 완전히 확정 아님) — MCP 디버그 연결
+  행위 자체가 이미 자동 실행 중인 흐름을 끊는 "관찰자 효과"가 있을 수
+  있다는 방법론적 제약을 발견. 이에 따라 "전원 재인가 직후 Claude가 바로
+  연결하지 않고, 사용자가 먼저 OLED/웹서버를 직접 확인한 뒤 보고" 하는
+  절차로 바꾸기로 함. **그런데 사용자가 이 방식대로(Claude 연결 없이) USB선을
+  뽑았다 몇 초 뒤 다시 꽂아 재시도했을 때도 "똑같은 것 같다"(여전히 실행
+  안 되는 것처럼 보임)고 보고함** — 이로써 "Claude의 연결이 유일한 원인"
+  이라는 가설은 약화됐으나, 사용자가 정확히 무엇을(OLED 화면/웹 URL
+  중 무엇을, 몇 초나 기다린 뒤) 확인했는지는 아직 구체적으로 확인하지
+  못했다(미확인) — 다음 단계로 Claude가 연결해 실제 로그를 직접 볼 예정,
+  아직 원인 미확정.
+  **후속 확인**: Claude가 재연결해 로그를 본 결과 `>>> [BOOT] launching
+  in 4...`까지 카운트다운이 실제로 출력된 뒤 또 `Exception: IDE
+  interrupt`로 끊기는 패턴이 재현됐다(두 번 연속, 거의 같은 지점). 이
+  시점엔 사용자도 Claude도 직접 개입하지 않았는데도 매번 비슷한 지점에서
+  끊긴다는 점에서, **Mac에서 실행 중인 VS Code CanMV 확장이 보드가 USB로
+  다시 나타나는 것을 감지하면 자동으로 재연결하며 REPL을 가로채는 것**이
+  유력한 원인으로 떠올랐다(가설, 확장 자체의 동작을 직접 들여다보지는
+  못해 완전히 확정은 아님). 이게 맞다면 같은 Mac에 USB로 물려 있는 한
+  "순수 전원만" 자동 실행 테스트가 근본적으로 성립하기 어려우며, 다음
+  검증 방법으로 이 Mac이 아닌 별도 전원(충전기/보조배터리)으로 전원을
+  공급해 CanMV 확장이 아예 보드를 못 보는 상태에서 재확인할 것을
+  제안함(아직 그 방식으로 재시도하지 않음).
+- **자동부팅에서 Mac UDP 마우스 제어가 안 되는 원인 — 전송 방식 불일치
+  (확인됨, 코드 수정 없는 순수 분석)**: Wi-Fi 웹서버는 자동부팅에서 정상
+  동작하는데 Mac의 UDP 디스커버리 브리지(`mac_mouse_bridge.py`)가
+  "DISCOVERY: Waiting for board..."에서 멈춰 있다는 보고를 받고 코드만
+  대조해 분석함(수정·배포·재부팅 전혀 안 함). `/sdcard/main.py`(자동부팅)는
+  `smart_glass_server.main(transport_kind="uart", enable_web=True)`를
+  직접 호출 — `firmware/run_uart_web.py`와 동일 프로필이라 마우스 전송은
+  무조건 UART(코드 확인됨, `smart_glass_server.py:432`). `transport.py:
+  196-197`의 `create_transport()`는 `kind == "uart"`일 때 `UartTransport()`
+  만 반환하며 UDP 소켓이나 `discovery.py`의 `@HELLO/@ACK` 자동 탐색은
+  `kind == "udp"` 분기에만 있어 전혀 실행되지 않음 — 보드가 UDP 패킷을
+  1개도 안 보내는 상태(확인됨). 포트 설정 자체는 양쪽 다 9000으로 일치
+  (`config.py MOUSE_UDP_PORT`, `mac_mouse_bridge.py DEFAULT_UDP_PORT`)하지만
+  무관함. **결론**: IP/포트 문제가 아니라 전송 채널 자체가 다른 것이
+  원인(UART2 물리 케이블 vs UDP 무선) — 자동부팅을 UART 그대로 쓰려면
+  Mac도 UART로 맞춰야 하지만 그러면 케이블이 필요해 "전원만으로 무선
+  동작" 목표와 모순되고, 자동부팅을 UDP로 바꾸면(`run_wifi.py`와 동일
+  조합 가능) `config.py` 자체 주석에 이미 "udp는 아직 실기기 미검증"이라고
+  적혀 있어 별도 검증이 필요함 — 둘 다 제안만 하고 적용은 하지 않았다.
+- **자동부팅을 UART에서 UDP로 전환 (적용 완료, 실기기 검증 진행 중)**:
+  사용자가 위 분석을 바탕으로 자동부팅의 마우스 전송 방식을 UDP로
+  바꿔달라고 요청, 기존 `run_wifi.py`를 재사용하고 `run_uart.py`는 건드리지
+  말라고 지시함. 변경 전 먼저 OLED가 통합된 지금 코드로
+  `firmware/run_wifi.py`(`transport_kind="udp", enable_web=True`)를 USB
+  REPL로 수동 실행해 검증(이 조합을 OLED 통합 이후 이번 세션에 실행한 적이
+  없었음) — `[UDP] Waiting for Mac registration...` → `[UDP] Mac
+  registered: 172.20.10.2:9000` → `[UDP] Mouse control ready`까지 정상
+  동작 확인(확인됨, 실기기 로그) — Mac이 보고했던 바로 그 IP로 정확히
+  등록됨. 이어서 `tools/autorun/main.py`의
+  `smart_glass_server.main(transport_kind="uart", enable_web=True)`를
+  `transport_kind="udp", enable_web=True`로 변경(`run_wifi.py`와 동일
+  프로필), docstring에 전환 이유(UART는 Mac에 케이블이 필요해 "전원만으로
+  무선 동작" 목표와 모순)를 명시. `firmware/run_uart.py`는 전혀 수정하지
+  않음(확인됨 — 보드에서 재다운로드해 `transport_kind="uart",
+  enable_web=False`로 기존과 동일함을 재확인). `canmv_save_main_py`로
+  `/sdcard/main.py`에 재배포 후 재다운로드해 `transport_kind="udp"`로
+  반영됐음을 확인. `tools/autorun/README.md`에도 전환 이유와 날짜를 기록.
+  실제 전원 재인가(물리 파워사이클)로 자동부팅+마우스 조작까지 검증하는
+  것은 아직 진행 중 — 직전에 발견한 "Claude의 MCP 연결 자체가 보드의
+  자동 실행을 끊는 관찰자 효과" 가설 때문에, 이번엔 Claude가 연결하지
+  않고 사용자가 직접(OLED 화면, Mac 브리지의 Board registered 로그, 실제
+  커서 이동) 확인한 뒤 보고하는 절차로 진행 중 — 아직 결과 보고받지 못함.
+- **자동부팅(UDP) 최종 전원 재인가 테스트 — 성공 확인 (2026-10-26)**:
+  위 절차대로 Claude가 연결하지 않은 상태에서 사용자가 직접 전원을
+  재인가해 테스트한 결과, OLED 화면 출력·Mac 브리지의 보드 등록·실제 손
+  움직임에 따른 Mac 커서 이동까지 전부 정상 동작함을 확인(확인됨, 사용자
+  직접 확인). 이로써 "자동부팅을 UDP로 전환"과 "MCP 연결의 관찰자 효과를
+  피해 사용자가 직접 확인" 두 가지 모두 유효한 해결책으로 검증됨 — 관찰자
+  효과 가설 자체의 근본 원인(VS Code CanMV 확장의 자동 재연결 여부)은
+  여전히 미확정이지만, 이를 회피하는 절차만으로 실사용 목표(전원만 연결)는
+  달성됨.
+- **문서 점검 및 최신화 (2026-10-26)**: 위 전원 재인가 성공을 계기로
+  `README.md`와 `../시연용_README.md`(저장소 상위 디렉토리)를 현재 구현과
+  대조 검토함. `README.md`에서 두 가지 사실 오류를 확인해 수정: (1)
+  `firmware/config.py`를 "어디서도 import되지 않는 placeholder"라고
+  설명했으나 실제로는 `smart_glass_server.py`가 `MOUSE_TRANSPORT`,
+  `MOUSE_UDP_*`, `VERBOSE_ORCHESTRATOR_LOGS`를 import해 사용 중임을
+  코드로 확인(확인됨). (2) `smart_glass_server.py`의 웹서버를 "소켓 bind
+  단계에서 막혀 미완료"라고 설명했으나 이번 세션 중 실기기에서 이미 전체
+  조합(카메라+AI+OLED+Wi-Fi+UDP+웹) 검증이 끝난 상태라 outdated였음(수정).
+  누락돼 있던 `run_uart.py`/`run_wifi.py`/`run_uart_web.py`,
+  `transport.py`/`wifi.py`/`discovery.py`, OLED 5개 모듈,
+  `tools/autorun/` 항목도 "파일 역할" 표에 추가. `../시연용_README.md`는
+  자동부팅(A)/UART(B)/Wi-Fi(C) 세 경로를 모두 반영하도록 재구성(A 섹션
+  신규 작성 포함)하고, "집 Wi-Fi 연결 성공률" 설명에 이번 세션 관찰(집
+  Wi-Fi가 매번 거부되고 핫스팟으로 전환됨, 원인 미확인)을 2026-10-23
+  기존 기록에 덧붙임 — 기존 수치(연속 3회 중 2회 성공)는 삭제하지 않고
+  날짜별로 구분해 병기.
 
 ## 5. 실패했던 접근 방식과 교훈
 
