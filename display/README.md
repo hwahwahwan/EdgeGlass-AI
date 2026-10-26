@@ -1,12 +1,15 @@
-# display/ — VLT-OL016 OLED (독립 개발, 실기기 미검증)
+# display/ — VLT-OL016 OLED (독립 개발, 기본 bring-up 실기기 검증 완료)
 
 `firmware/`(손 추적/마우스 제어 데모)와 완전히 분리된 독립 모듈이다. 이 폴더의
 코드는 `firmware/`를 **읽기 전용으로만** 참고했고, import하거나 수정하지 않았다.
 기존 ST7789 LCD 코드는 `archive/st7789_lcd/`에 보관돼 있다(더 이상 유지보수 안 함).
 
-**이번 세션에는 실제 VLT-OL016 패널이 없어 실기기 테스트를 전혀 하지 못했다.**
-아래 모든 "실기기 확인" 항목은 전부 미확인이며, PC 시뮬레이션·단위 테스트만
-완료된 상태다. 코드 작성 완료를 실기기 검증 성공으로 취급하지 않는다.
+**2026-10-26, 실제 Voltly VLT-OL016을 K230D-Zero에 연결해 `oled_basic_test.py`
+기본 bring-up 테스트를 실기기에서 실행하고 육안으로 확인했다** — I2C scan,
+주소 인식, 화면 지우기/전체 켜짐/텍스트+도형 출력까지 전부 성공(아래 7절
+"실기기 테스트 결과" 참고). 다만 이것은 **독립 bring-up 테스트 수준의 검증**이고,
+실제 손 관절 스켈레톤(`DisplayUI`)을 AI 추론 루프에 연결해 보여주는 것까지는
+아직 실기기로 검증하지 않았다 — 아래 "알려진 제약" 참고.
 
 ## 1. 대상 디스플레이 — 확인된 사양 vs 추정
 
@@ -15,9 +18,9 @@
 | 제품명 | Voltly VLT-OL016 | 사용자 제공 |
 | 종류 | 0.96인치 White OLED | 사용자 제공 |
 | 인터페이스 | 4핀 I2C (GND/VCC/SCL/SDA) | 사용자 제공 |
-| 해상도 | 128×64 | **추정** — 0.96인치 I2C OLED의 사실상 표준 규격이나, 이 모듈 고유의 데이터시트는 확인하지 못했다 |
-| 컨트롤러 | SSD1306 | **추정** — 사용자 지시대로 우선 가정. 0.96인치 128×64 I2C OLED 대다수가 SSD1306이지만 SH1106 등 다른 컨트롤러일 가능성도 있다 |
-| I2C 주소 | 0x3C (기본 가정), 0x3D(대안) | SSD1306의 일반적인 두 주소. `oled_device.open_display()`가 `i2c.scan()` 결과를 항상 로그로 남기므로, 실기기 연결 시 실제 주소를 바로 확인할 수 있다 |
+| 해상도 | 128×64 | 가정값 그대로 `oled_basic_test.py`를 실기기에서 실행해 정상 출력 확인(2026-10-26) — 패널 고유 데이터시트로 치수를 직접 대조한 것은 아님 |
+| 컨트롤러 | SSD1306 | `drivers/ssd1306.py`(micropython-lib 포팅, 초기화 시퀀스 무수정)로 실기기에서 화면 출력 확인(2026-10-26) — SSD1306 호환으로 사실상 확인됨 |
+| I2C 주소 | 0x3C | 실기기 `i2c.scan()`에서 `0x3C` 하나만 확인됨(2026-10-26) |
 
 컨트롤러가 SSD1306이 아닐 경우, `drivers/ssd1306.py`만 교체하면 되도록
 `src/oled_device.py`는 `SSD1306_I2C`를 **딱 한 곳**에서만 import한다(아래
@@ -43,16 +46,16 @@
 그대로 포팅**했다. CanMV 전용 코드(FPIOA 핀 설정, I2C 객체 생성)는 드라이버
 밖(`src/oled_device.py`)으로 분리했다.
 
-## 3. K230D-Zero 핀 연결표 — 후보, 실기기 미검증
+## 3. K230D-Zero 핀 연결표 — 실기기 연결 및 통신 확인됨 (2026-10-26)
 
 | OLED 핀 | K230D-Zero 핀 | 신호 | 상태 |
 |---|---|---|---|
-| GND | GND | - | 안전, 변경 없음 |
-| VCC | 3V3 | 3.3V | VLT-OL016의 정확한 전압 스펙 미확인 — 3.3V 전용 I2C OLED가 일반적이라는 가정. **5V 금지** |
-| SCL | IO_11 | I2C2 SCL (하드웨어) | **공식 CanMV 예제와 동일한 후보.** `FPIOA.help(11)` 같은 실기기 조회로는 확인하지 못했다(보드 없음). 프로젝트 전체 검색으로 `firmware/`가 이 핀을 전혀 쓰지 않음은 확인했다 |
-| SDA | IO_12 | I2C2 SDA (하드웨어) | 위와 동일 — 공식 예제 기준 후보, 실기기 미확인, 충돌 없음만 확인 |
+| GND | GND | - | 실제 배선으로 연결, 정상 동작 |
+| VCC | 3V3 | 3.3V | 실제 3V3 핀으로 연결, 정상 동작(5V는 시도하지 않았다) |
+| SCL | IO_11 | I2C2 SCL (하드웨어) | 실제 배선으로 연결, `i2c.scan()`에서 장치가 잡혀 통신 확인됨 |
+| SDA | IO_12 | I2C2 SDA (하드웨어) | 위와 동일 — 실제 배선·통신 확인됨 |
 
-핀 번호는 `display/config.py`의 `PIN_SCL`/`PIN_SDA`/`I2C_ID`에 모여 있다.
+핀 번호는 `display/display_config.py`의 `PIN_SCL`/`PIN_SDA`/`I2C_ID`에 모여 있다.
 
 **다른 K230 보드 예제를 그대로 복사하지 않았다** — IO11/12는 이 프로젝트가 실제
 쓰는 "K230 CanMV" 계열의 **공식** SSD1306 예제에서 가져온 것이며, 별도로
@@ -77,12 +80,18 @@ display/
 │   └── test_oled_device.py
 ├── examples/
 │   ├── oled_basic_test.py  # 보드 전용 (I2C scan + 채우기 + 텍스트)
+│   ├── oled_hand_demo.py   # 보드 전용 (합성 손동작 더미 데이터 -> 실제 패널, AI 미연동)
 │   ├── hand_demo.py        # PC 전용 (가상 손동작 -> PNG 저장)
 │   └── output/             # hand_demo.py가 생성하는 PNG들
-├── config.py                # 핀/I2C/레이아웃/업데이트 주기 상수
+├── display_config.py        # 핀/I2C/레이아웃/업데이트 주기 상수 (firmware/config.py와
+│                             # 모듈명 충돌을 피하려고 config.py가 아닌 이 이름을 씀)
 ├── README.md                 (이 파일)
 └── DEVELOPMENT.md
 ```
+
+실제 AI 추론 루프 연동(더미 데이터가 아닌 `firmware/hand_tracker.py`의 실시간 손
+관절)은 `display/` 바깥, `firmware/smart_glass_server.py`에 구현한다 — 아래
+"실제 AI 루프 연동" 절 참고.
 
 ## 5. 보드에서 실행할 테스트 파일
 
@@ -92,13 +101,18 @@ CanMV는 실행 스크립트 자신의 디렉터리를 `sys.path`에 자동으�
 `display/`도 **보드에는 평탄화해서** 올려야 한다:
 
 ```text
-display/config.py              -> /sdcard/display/config.py
+display/display_config.py      -> /sdcard/display/display_config.py
 display/drivers/ssd1306.py     -> /sdcard/display/ssd1306.py
 display/src/oled_device.py     -> /sdcard/display/oled_device.py
 display/src/hand_renderer.py   -> /sdcard/display/hand_renderer.py
 display/src/display_ui.py      -> /sdcard/display/display_ui.py
 display/examples/oled_basic_test.py -> /sdcard/display/oled_basic_test.py
+display/examples/oled_hand_demo.py  -> /sdcard/display/oled_hand_demo.py  (더미 데이터, AI 미연동)
 ```
+
+이 `/sdcard/display/` 경로는 **`display/`를 독립적으로 테스트할 때만** 쓴다.
+실제 AI 루프에 연동할 때는 `firmware/`와 같은 `/sdcard/smart_glass/`에
+합쳐서 배포한다 — 아래 "실제 AI 루프 연동" 절 참고.
 
 (로컬 폴더 이름이 보드 경로와 같아야 한다고 가정하지 않는다 — `firmware/`와
 동일한 원칙.) 평탄화 후 CanMV IDE에서 `oled_basic_test.py`를 직접 실행한다.
@@ -135,36 +149,47 @@ cd display
 python3 -m unittest discover -s tests -v
 ```
 
-## 7. 실제 OLED 연결 후 실행 순서 (귀가 후)
+## 7. 실제 OLED 연결 후 실행 순서 — 실기기 테스트 결과 (2026-10-26)
 
 1. 4핀(GND/VCC/SCL/SDA)을 위 배선표대로 연결한다 — 전원 올리기 전 한 번 더
-   확인(특히 VCC는 3.3V만).
+   확인(특히 VCC는 3.3V만). **완료.**
 2. `display/` 전체를 위 "보드에서 실행할 테스트 파일" 절차대로
-   `/sdcard/display/`에 평탄화해서 올린다.
-3. `oled_basic_test.py`를 CanMV IDE에서 실행한다.
-4. 콘솔의 `[OLED] i2c.scan() -> [...]` 로그를 먼저 확인한다 — 빈 리스트면
-   배선/전원 문제, `config.OLED_I2C_ADDR`(0x3C)와 다른 주소가 나오면
-   `config.py`의 주소를 그 값으로 바꾸고 재실행한다.
+   `/sdcard/display/`에 평탄화해서 올린다. **완료.**
+3. `oled_basic_test.py`를 CanMV IDE에서 실행한다. **완료, 2회 재실행 모두
+   동일하게 성공.**
+4. 콘솔의 `[OLED] i2c.scan() -> [...]` 로그를 먼저 확인한다 — **`['0x3c']`
+   로 확인됨**, `config.OLED_I2C_ADDR`(0x3C)와 추가 수정 없이 바로 일치했다.
 5. 화면에 검정→흰색 전환, 이어서 "EdgeGlass OLED"/"OK" 텍스트와 사각형
-   테두리가 보이면 기본 bring-up 성공이다.
+   테두리가 보이면 기본 bring-up 성공이다. **사용자가 육안으로 확인함** —
+   흰 화면 전환과 텍스트 출력을 확인했고, 이후 `close_display()`가
+   `poweroff()`를 호출해 화면이 꺼지는 것도 의도된 동작임을 확인했다(테스트
+   종료 직후 "화면이 바로 꺼졌다"는 관찰은 이 때문). 추가로 흰 화면을
+   계속 켜 두는 진단 스크립트(`oled_fullon_hold.py`, 무한 루프로 유지,
+   `[CanMV] stop` 버튼으로 종료)로 화면이 꺼지지 않고 유지되는 것도
+   별도로 확인했다.
 6. 실패하면(scan에 주소가 잡히는데도 화면이 안 나오는 경우) `drivers/ssd1306.py`의
-   초기화 시퀀스가 이 패널과 안 맞을 가능성이 있다 — `DEVELOPMENT.md`의
-   "알려진 제약" 참고.
-7. 기본 bring-up이 확인되면, `src/display_ui.py`의 `DisplayUI`를
-   `oled_device.open_display()`가 반환한 객체로 생성해 실제 손동작 데이터로
-   테스트한다(이번 단계에서는 아직 만들지 않음 — 완료 기준 참고).
+   초기화 시퀀스가 이 패널과 안 맞을 가능성이 있다 — 이번에는 이 경우에
+   해당하지 않았다.
+7. 기본 bring-up이 확인됐으므로, 다음 단계는 `src/display_ui.py`의
+   `DisplayUI`를 `oled_device.open_display()`가 반환한 객체로 생성해 실제
+   손동작 데이터로 테스트하는 것이다(아직 수행하지 않음 — `docs/DEV_HISTORY.md`
+   4-3의 연결 지점 분석 참고).
 
 ## 8. 알려진 제약 및 미검증 사항
 
-- VLT-OL016이 실제로 SSD1306 호환인지, 128×64가 맞는지, I2C 주소가 0x3C인지
-  **전부 미확인**.
-- `machine.I2C.writevto()`가 upstream 드라이버가 기대하는 대로 한 번의
-  START/STOP 안에서 여러 버퍼를 보내는지 미확인(API 시그니처만 대조함).
-- IO11(SCL)/IO12(SDA)가 실제로 비어 있는 핀인지 `FPIOA.help()`로 확인하지
-  못했다 — 보드 미보유.
+- VLT-OL016의 I2C 통신·주소(0x3C)·기본 SSD1306 초기화 시퀀스는 **실기기로
+  확인됨**(2026-10-26, `oled_basic_test.py`). 다만 `machine.I2C.writevto()`가
+  upstream 드라이버가 기대하는 대로 정확히 한 번의 START/STOP 안에서 여러
+  버퍼를 보내는지(API가 예외 없이 동작한다는 것과 프로토콜이 정확한지는
+  별개)와, IO11(SCL)/IO12(SDA)가 다른 용도와 완전히 충돌 없는 전용 핀인지
+  `FPIOA.help()`로 직접 조회한 적은 없다 — 지금까지는 코드 동작과 화면
+  출력으로 간접 확인한 것이다.
 - `oled_device.open_display()`가 "패널 없음"을 크래시 없이 처리한다는 설계는
   코드 레벨 테스트(fake `machine`)로만 확인했고, 실제 I2C 버스 에러 상황에서도
   똑같이 안전할지는 실기기 확인이 필요하다.
+- `DisplayUI`(손 관절 스켈레톤 UI)는 아직 실기기에서 실행해 보지 않았다 —
+  이번에 검증한 것은 `oled_basic_test.py`의 기본 bring-up(지우기/전체 켜짐/
+  고정 텍스트)뿐이다.
 - 상태 표시줄 레이아웃은 `framebuf.FrameBuffer.text()`의 고정 8×8 비트맵
   폰트(128px ÷ 8px = 한 줄 최대 16글자) 제약에 맞춰 설계값을 줄였다 — 참고
   목업 이미지의 "MOVE    FPS 8.5    HAND OK"(약 27자)는 실제 해상도에서

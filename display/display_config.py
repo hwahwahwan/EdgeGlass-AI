@@ -1,9 +1,13 @@
 """display/ configuration: pins, I2C, OLED geometry, update-rate limiting.
 
-Kept separate from firmware/config.py -- display/ is an independent module
-developed without the real VLT-OL016 panel in hand (see README.md). Every
-value here that depends on real hardware is marked as confirmed or
-candidate/unverified.
+Named display_config.py (not config.py) because firmware/config.py is
+deployed to the same flat board directory when display/ is wired into
+smart_glass_server.py (see docs/DEV_HISTORY.md 4-3) -- two same-named
+flat modules in one directory would shadow each other. Kept functionally
+separate from firmware/config.py regardless -- display/ is an independent
+module developed without the real VLT-OL016 panel in hand at first (see
+README.md). Every value here that depends on real hardware is marked as
+confirmed or candidate/unverified.
 """
 
 # ============================================================

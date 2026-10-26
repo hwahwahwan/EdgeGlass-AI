@@ -68,7 +68,7 @@ class DisplayUIUpdateTests(unittest.TestCase):
         ui.update(None, "STOP", now_ms=0)
         # Status bar divider line (row at OLED_HEIGHT - STATUS_BAR_HEIGHT)
         # should be lit even with no hand present.
-        import config
+        import display_config as config
         bar_row = config.OLED_HEIGHT - config.STATUS_BAR_HEIGHT
         self.assertTrue(any(canvas.pixels[bar_row]))
 
@@ -93,7 +93,7 @@ class DisplayUIUpdateTests(unittest.TestCase):
         canvas = VirtualOLED()
         ui = display_ui.DisplayUI(canvas)
         ui.update(_any_hand(), "CLICK", fps=8.1, now_ms=0)
-        import config
+        import display_config as config
         text_y = config.OLED_HEIGHT - config.STATUS_BAR_HEIGHT + 2
         row_lit = sum(1 for v in canvas.pixels[text_y] if v)
         self.assertGreater(row_lit, 0)

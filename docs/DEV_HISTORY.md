@@ -316,6 +316,106 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
     없음을 확인(확인됨 — 코드에 없음). AI 추론·UART/UDP 마우스 전송·웹
     스트리밍이 전부 단일 스레드를 공유하므로 OLED I2C가 블로킹되면 전체
     루프가 같이 멈출 위험이 있다(가설, 미검증).
+- **첫 실기기 배선/부팅 테스트 — I2C 통신과 실제 화면 출력 모두 확인됨
+  (해결됨)**: 실제 Voltly VLT-OL016(0.96인치 White I2C OLED, 4핀)을
+  K230D-Zero에 연결(GND-GND, VCC-3V3, SCL-IO11, SDA-IO12 — `config.py`의
+  후보 핀과 정확히 일치)한 뒤 `display/`를 `/sdcard/display/`에 평탄화
+  배포하고 `oled_basic_test.py`를 실행했다. 콘솔 로그:
+  `i2c.scan() -> ['0x3c']`, `ready (128x64 @ 0x3C)`, cleared/full-on/
+  text+shape 전부 OK, PASSED(2회 재실행 모두 동일). **I2C 핀
+  (GPIO11=SCL/GPIO12=SDA, I2C2)과 주소(0x3C)가 실기기에서 확인됨
+  (확인됨)** — 기존에 "공식 예제 기반 후보, 실기기 미검증"이었던 항목.
+  처음에는 사용자가 "화면에 아무것도 안 뜬 것 같다"고 보고해 원인 미확인
+  상태로 기록했었으나, 사용자가 다시 확인한 결과 **오인이었음이 밝혀짐
+  (확인됨)** — 실제로는 검정→흰색 전환과 "EdgeGlass OLED"/"OK" 텍스트+
+  사각형이 전부 정상 출력됐고, 그 직후 `oled_basic_test.py`의 `finally`
+  블록이 `oled_device.close_display(oled)` → `oled.poweroff()`를 호출해
+  화면이 꺼지는 것(의도된 동작)을 "안 떴다"로 오인한 것이었다. 추가로
+  화면을 흰색으로 켠 채 무한 루프로 유지하는 진단 스크립트
+  (`oled.contrast(255); oled.fill(1); oled.show()` 후
+  `while True: time.sleep(1)`, 보드에만 임시 작성)를 실행해 사용자가
+  "흰색 유지되고 있어 굿"이라고 직접 재확인했다(`canmv_stop_script`로
+  정상 종료 — IDE interrupt → soft reboot, 4-1/21의 기존에 알려진 정상
+  정지 패턴과 동일). **결론: VLT-OL016의 I2C 통신, 주소, SSD1306 초기화
+  시퀀스, 실제 화면 출력(지우기/전체 켜짐/텍스트+도형)까지 전부 실기기
+  육안으로 검증 완료** — `archive/st7789_lcd`의 "코드는 PASSED인데 화면엔
+  안 나왔던" 사례와 달리, 이번에는 코드 레벨 성공과 시각적 성공이 둘 다
+  확인된 첫 사례다. 남은 것: 이번에 검증한 것은 `oled_basic_test.py`의
+  기본 bring-up까지이고, `DisplayUI`(21개 손 관절 스켈레톤 렌더링)를
+  실기기에서 실행해 본 적은 아직 없으며 실제 AI 추론 루프 연결(4-3 앞
+  항목에서 분석만 함)도 아직 구현 전이다.
+- **`str.ljust()`가 이 보드의 MicroPython 빌드에 없어 스켈레톤 렌더링이
+  매 프레임 실패하던 문제 (해결됨)**: `DisplayUI`(21개 손 관절
+  스켈레톤)를 실기기에서 처음 실행해보려고 새 보드 전용 테스트
+  `examples/oled_hand_demo.py`(합성 손 좌표로 실제 패널에서 `DisplayUI`를
+  구동 — `oled_basic_test.py`와 달리 스켈레톤 렌더링 경로까지 실제로
+  실행하는 첫 보드 테스트)를 작성해 배포·실행하자, 콘솔에 매 프레임
+  `[OLED] update() draw failed: AttributeError("'str' object has no
+  attribute 'ljust'",)`가 출력되고 화면에 스켈레톤이 전혀 그려지지
+  않았다(`DisplayUI.update()`의 기존 try/except가 예외를 삼켜 보드 자체가
+  멈추지는 않았음). 원인은 확인됨 — `display_ui.py`의
+  `_draw_status_bar()`가 `label = (gesture or "")[:5].ljust(5)`로 상태
+  텍스트를 패딩했는데, PC의 CPython에는 `str.ljust()`가 있어 단위 테스트
+  29개는 전부 통과했지만 이 K230D-Zero CanMV MicroPython 빌드
+  (v1.8-0-gc2d1f5c)의 str 타입에는 `ljust()`/`rjust()`가 구현돼 있지
+  않다 — PC 테스트가 실기기 MicroPython API 서브셋 차이를 못 잡아낸
+  사례로, `bytes.decode(errors=...)` 키워드 인자 버그(10-4-2, K-1)와
+  같은 종류. (채택) `.ljust(5)` 호출을 제거하고
+  `label = (gesture or "")[:5]; label = label + " " * (5 - len(label))`로
+  수동 패딩하는 코드로 교체 — 슬라이싱과 문자열 `+`/`*`는 CPython/
+  MicroPython 양쪽에서 동일하게 지원된다. `display/` 전체에서
+  `.ljust`/`.rjust`/`.format(`/f-string 사용을 재검색해 다른 곳에는 이
+  패턴이 없음을 확인(확인됨). 검증 결과: PC 단위 테스트 29개 재실행 전부
+  통과(회귀 없음), 보드의 `/sdcard/display/display_ui.py`에도 재배포 후
+  `oled_hand_demo.py`를 다시 실행한 결과 `AttributeError` 없이 그리기가
+  성공하는 것을 콘솔 로그로 확인함(에러 로그가 더 이상 찍히지 않음).
+- **`display/config.py` 모듈명 충돌을 `display_config.py`로 리네임해 해결
+  (해결됨)**: `display/config.py`와 `firmware/config.py`가 둘 다
+  `config.py`라서, 평탄화해서 같은 디렉터리(`/sdcard/smart_glass/`)에
+  배포하면 하나가 다른 하나를 가린다는 문제를 이전 턴에 발견만 하고
+  해결은 미뤄뒀었다. 원인은 확인됨 — 두 독립 모듈이 각자 개발되며
+  우연히 같은 파일명을 씀. (채택) `display/config.py`를
+  `display/display_config.py`로 리네임(로컬 소스 자체 변경, 배포 시
+  별도 변환 없이 그대로 평탄화 복사). `src/oled_device.py`,
+  `src/display_ui.py`의 `import config`를
+  `import display_config as config`로 바꿔 코드 내부의 `config.XXX`
+  참조는 그대로 유지(변경 범위 최소화). `tests/test_display_ui.py`의
+  테스트 내부 `import config` 2곳도 동일하게 변경. 검증 결과: PC 단위
+  테스트 29개와 `examples/hand_demo.py` PC 데모 재실행 전부 정상 동작,
+  보드에 `/sdcard/smart_glass/display_config.py`로 배포한 뒤 아래 통합
+  테스트에서 `firmware/config.py`와 충돌 없이 둘 다 정상 import됨을
+  실기기로 확인.
+- **실제 AI 추론 루프(`firmware/smart_glass_server.py`)와 OLED 연동 —
+  첫 실기기 통합 성공 (해결됨)**: 이전 턴들은 연결 지점 분석(연구)과
+  더미 데이터 bring-up 테스트까지만 했고, 실제 `hand_tracker.py` 결과를
+  OLED에 연결하는 구현·배포·실행은 이번에 처음 했다. 구현(`main.py`는
+  건드리지 않음): 새 `FEATURE_DISPLAY_OLED` 플래그를 기존
+  `FEATURE_DISPLAY_OSD`와 독립된 별개 물리 디스플레이로 추가;
+  `oled_device`/`display_ui`를 try/except ImportError로 가드 임포트(미배포
+  시에도 오케스트레이터 전체가 죽지 않도록); 메인 루프에서
+  `tracker.run()`의 flat `points` 배열(`[x0,y0,x1,y1,...,x20,y20]`)을
+  `[(points[i*2], points[i*2+1]) for i in range(21)]`로 변환해 매 프레임
+  `DisplayUI.update()`에 전달, 손이 없을 때는 `landmarks=None`을 명시적
+  전달(`_draw()`가 매번 `canvas.fill(0)`을 먼저 호출하므로 이전 프레임
+  스켈레톤이 안 남음을 보장); 제스처 `action`은 하단 상태 텍스트에만
+  전달(스켈레톤은 항상 실제 landmarks로만 그려짐, 더미 고정 포즈 없음 —
+  이전 턴에 코드 레벨로 이미 확인된 설계 그대로); 30프레임마다만
+  갱신되는 fps를 `last_fps`에 캐싱해 매 프레임 전달; `finally`에
+  `oled_device.close_display(oled)` 추가. OLED는 기존
+  `MIN_UPDATE_INTERVAL_MS=100ms` 내부 스로틀을 그대로 쓰고 매 프레임
+  강제 갱신하지 않음(이전 턴에 분석한 I2C 성능 영향 완화를 위해 추가
+  조정 없이 기존 안전장치에 의존). 배포 전 보드의 기존
+  `smart_glass_server.py`가 로컬 git HEAD와 바이트 단위로 완전히 일치함을
+  먼저 확인(27493바이트 동일, 보드 자체 수정 없었음 확인)한 뒤 덮어썼고,
+  배포 후 전 파일 바이트 크기를 로컬과 대조해 일치 확인. **검증 결과:
+  실기기 통합 테스트 성공(확인됨)** — `run_uart.py`(Wi-Fi 없이 UART만,
+  카메라+AI+OSD+OLED 경로)로 실행해 `[OLED] i2c.scan() -> ['0x3c']`,
+  `[OLED] ready (128x64 @ 0x3C)`, `[OLED] display ready`가 출력되고 실제
+  손 움직임에 따라 `[ORCH] ACTION: MOVE`/`STOP`과 `CLICK_DECISION`/
+  `CLICK_TX` 로그가 실시간으로 바뀌는 것을 확인했으며, **사용자가 OLED
+  패널에서 실제 손 움직임을 따라가는 스켈레톤과 하단 상태 텍스트 변화를
+  직접 육안으로 확인하고 "잘됨"이라고 확인함**. 카메라+AI 추론+제스처
+  판정+UART 마우스 전송+OLED가 동시에 크래시 없이 동작.
 
 ## 5. 실패했던 접근 방식과 교훈
 
@@ -373,12 +473,102 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
    다음 SSID로 넘어가는 실기기 시나리오는 확인되지 않았다.
 5. **transport 예외 격리** — 코드와 테스트는 통과했으나, 의도적으로 UDP 예외를
    발생시킨 상태에서 AI/웹이 살아남는 실기기 검증은 없다.
-6. **`display/` OLED 실기기 미검증** — VLT-OL016이 실제 SSD1306 호환인지,
-   128×64/주소 0x3C가 맞는지, `machine.I2C.writevto()`가 upstream이 기대하는
-   단일 트랜잭션으로 동작하는지, GPIO11/12가 실제로 비어 있는지(`FPIOA.help()`
-   미실행) 전부 미확인이다(근거는 본 문서 4-3). PC 가상 렌더러의 폰트 렌더링은
-   **소스 코드 레벨로는 해결**(upstream MicroPython 폰트/알고리즘 포팅)됐고,
-   남은 것은 실제 패널에서의 육안 비교뿐이다.
+6. **`display/` OLED — bring-up부터 실제 AI 루프 연동까지 실기기 검증
+   완료** — I2C 핀(GPIO11=SCL/GPIO12=SDA, I2C2), 주소(0x3C), SSD1306
+   초기화, 화면 출력, 그리고 `firmware/smart_glass_server.py`를 통한 실제
+   `hand_tracker.py` 손 관절 스켈레톤 실시간 표시까지 전부 실기기
+   육안으로 검증됐다(본 문서 4-3). PC 가상 렌더러의 폰트 렌더링은
+   **소스 코드 레벨로는 해결**(upstream MicroPython 폰트/알고리즘
+   포팅)됐고, 남은 것은 실제 패널에서의 글자 모양 육안 비교뿐이다.
+7. **카메라 센서 구동 시 보드 LED 점등 — 원인 미확정, "카메라 전원" 가설은
+   약화됨** — `smart_glass_server.py`(카메라 포함 전체 통합)를 처음
+   실행하자 보드 LED가 켜짐(사용자 보고: 눈이 아플 정도로 밝음). 최초
+   가설은 "OV5647 카메라 모듈 전원 인가 시 하드웨어 내장 LED가 자동
+   점등"이었으나, **사용자가 "카메라는 전부터 계속 썼는데 이번에 처음
+   켜졌다"고 반증 정보를 제공해 이 가설은 약화됨.** 코드 기준 재조사
+   결과(이번에도 LED를 끄거나 펌웨어를 수정하지 않음, 순수 조사만):
+   - 확인됨 — `git diff firmware/smart_glass_server.py`로 대조한 결과,
+     카메라/Display 초기화 코드(`CameraRig.create()` 전체)는 이번 턴에
+     1바이트도 바뀌지 않았다. 수정분은 전부 새로 추가된 OLED 코드뿐이다.
+   - 확인됨 — 이 diff에서 GPIO/전원 레벨 하드웨어를 새로 건드리는 코드는
+     `oled_device.open_display()` 내부의 `FPIOA().set_function(11,
+     FPIOA.IIC2_SCL)` / `set_function(12, FPIOA.IIC2_SDA)` /
+     `I2C(2, freq=400000)` 세 줄이 유일 — GPIO11/12에 FPIOA 함수를
+     할당하는 코드가 이 프로젝트에서 이번 세션에 처음 실행됐다.
+   - 확인됨 — 캐시된 CanMV 공식 예제 492개를 검색했으나 보드 LED나 카메라
+     LED를 설명하는 예제/문서를 찾지 못함. 유일한 관련 예제
+     (`examples/27-Gesture-controlled-light/led_control.py`)는 GPIO42/43에
+     사용자가 직접 배선한 외부 LED를 PWM으로 제어하는 별개 참고 프로젝트.
+   - 미확인 — GPIO11/12가 보드 자체에서 LED와 물리적으로 연결돼 있는지는
+     소프트웨어 grep으로 답할 수 없음. 실제 보드의 `FPIOA.help(11)`/
+     `FPIOA.help(12)` 조회나 공식 핀맵 문서로만 확인 가능한데, 실시간
+     테스트 중단이 필요해 사용자 승인을 받고 조회할 예정 — 아직 실행 전.
+   - (이전 턴 가설, **이번 턴 실기기 분리 테스트로 반증·기각됨** — 아래 참고)
+     카메라 전원보다는 GPIO11/12 FPIOA 설정이 더 유력하다고 봤던 가설.
+
+   **단계별 분리 테스트 (사용자 제안, 실기기로 직접 확인) — OLED는 원인에서
+   배제됨(확인됨)**: 펌웨어를 수정하지 않고 별도 진단 스크립트
+   (`display/examples/led_stage_test.py` → `/sdcard/smart_glass/
+   led_stage_test.py`)를 만들어 `STAGE` 상수만 바꿔가며 한 단계씩
+   실행하고, 매 단계 사용자가 직접 LED를 육안 확인한 뒤에만 다음 단계로
+   진행했다:
+   1. 카메라(Sensor)+OSD(Display.init)만, OLED 코드 0줄 — **LED 안 켜짐**
+   2. + `FPIOA.set_function(11/12, IIC2_SCL/SDA)`(I2C 객체 없음) — **안 켜짐**
+   3. + `I2C(2, freq=400000)` 객체 생성(scan 전) — **안 켜짐**
+   4. + `i2c.scan()`(`['0x3c']` 정상 감지) — **안 켜짐**
+   5. + `SSD1306_I2C(...)` 생성(초기화 명령 전송 + fill(0)+show() 포함) — **안 켜짐**
+   6. + 화면 전체를 흰색으로(fill(1)+show()) — **안 켜짐**
+
+   즉 OLED 관련 코드 경로(GPIO11/12 FPIOA, I2C2 통신, SSD1306 초기화,
+   실제 화면 출력)를 전부 실행해도 LED는 켜지지 않았다 — **이전에 "GPIO11/12가
+   더 유력하다"고 했던 가설은 이번 분리 테스트로 반증되어 기각됨.** OLED는
+   LED 점등 원인에서 사실상 배제됨.
+
+   **새로운 용의선(가설, 미검증)**: 위 진단에는 없었지만 실제로 LED가
+   켜졌던 `run_uart.py`(smart_glass_server.py 전체 통합) 실행에만 있던
+   요소들 — `HandTracker` 생성(hand_det.kmodel/handkp_det.kmodel을 NPU에
+   로드), 실제 AI 추론 루프(`tracker.run()` 반복 NPU 추론), 카메라
+   채널2(AI용)에서 반복적으로 `sensor.snapshot()`하는 루프, UART 마우스
+   컨트롤러. 다음 단계로 "OLED 없이 카메라+OSD+AI 추론(HandTracker, 반복
+   루프)만" 조합을 테스트할 예정(사용자 승인받음, 다음 턴에 진행). 당장은
+   테이프로 물리적으로 가리는 방법을 안내함(미해결).
+
+   **후속 테스트(AI/NPU 추론) — 확인됨, 추가로 배제됨**: 별도 진단
+   스크립트(`display/examples/ai_stage_test.py`)로 카메라+OSD만 깐 상태에서
+   (1) `HandTracker` 생성(hand_det.kmodel/handkp_det.kmodel을 NPU에 로드)과
+   (2) 실제 NPU 추론 20~30회 반복(`tracker.run()`, 손 인식 성공 확인)까지
+   사용자가 매 단계 직접 확인했으나 **LED 안 켜짐**. AI/NPU 추론 경로도
+   원인에서 배제됨. (참고: 3단계 추론 도중 USBDBG 연결이 한 번 끊기며
+   `IDE interrupt` 없이 조용히 소프트 리부트된 사건이 있었으나, 그 순간도
+   LED는 꺼져 있었다고 사용자가 확인함 — 이 리부트 자체와 LED는 무관.)
+
+   **후속 테스트(UART2) — 확인됨, 마지막 용의선도 배제됨**: 별도 진단
+   스크립트(`display/examples/uart_stage_test.py`)로 카메라+OSD만 깐
+   상태에서 (1) `MouseController(AI_RGB888P_SIZE)` 생성(`UART(UART.UART2,
+   115200, 8N1)` 오픈, FPIOA 핀 할당 없음, 고정 보드 핀)과 (2) 실제
+   `mouse_controller.update()` 호출로 MOVE/CLICK/STOP `@MOUSE` 프로토콜
+   라인을 UART2로 전송하는 것까지 전부 **LED 안 켜짐**. 이로써 OLED(6단계
+   전부)·AI/NPU 추론(모델 로드+실제 추론)·UART2(생성+실제 전송) —
+   `run_uart.py`를 구성하는 모든 개별 요소가 분리 테스트로 LED와 무관함이
+   확인됨.
+
+   **최종 재현 시도 — 확인됨**: 사용자 지시대로 추가 추측 테스트를 만들지
+   않고, LED가 실제로 켜졌던 원본 `run_uart.py`(smart_glass_server.py 전체
+   통합, FEATURE_DISPLAY_OLED=True 포함)를 코드 변경 없이 그대로
+   재실행했다. `[OLED] display ready`, 메인 루프의 `[ORCH] ACTION:
+   MOVE/STOP` 반복까지 정상 확인했으나, **이번에는 LED가 켜지지 않음**
+   (사용자 확인: "안켜지네 버그였나봐").
+
+   **최종 결론(확인됨)**: OLED, AI/NPU 추론, UART2를 포함한 전체 코드
+   경로를 개별적으로도, 원본 그대로도 재현 시도했으나 LED가 다시 켜지지
+   않았다 — 이 프로젝트의 어떤 코드 경로도 LED 점등과 결정론적으로
+   연결되지 않음이 실기기 재현 시도로 확인됐다. 최초 1회 관찰된 LED
+   점등은 이 레포지토리의 코드가 아니라, 그 순간의 **일시적 하드웨어/전원
+   글리치(원인 미상)였을 가능성이 가장 높다** — 재현 불가로 더 이상
+   특정할 근거가 없다. 조사는 이것으로 종결하되, 재발 시 이번에 만든 세
+   진단 스크립트(`led_stage_test.py`, `ai_stage_test.py`,
+   `uart_stage_test.py`, 전부 `display/examples/`에 보존됨)로 다시 재현
+   테스트할 수 있다.
 
 ## 7. 앞으로의 개선 과제
 

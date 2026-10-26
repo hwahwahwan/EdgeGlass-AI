@@ -9,14 +9,18 @@ modules the same way this project's existing tests fake `machine` for
 firmware/transport.py -- see tests/test_wifi_mouse_transport.py).
 
 Flat-import convention: on the real board this file is deployed next to
-config.py and drivers/ssd1306.py flattened into one directory (see
+display_config.py and drivers/ssd1306.py flattened into one directory (see
 README.md "보드에서 실행할 테스트 파일"), matching this project's existing
 firmware/ -> /sdcard/smart_glass/ convention (see /CLAUDE.md). So the
-imports below are flat (`import config`, `from ssd1306 import
-SSD1306_I2C`), not package-relative.
+imports below are flat (`import display_config`, `from ssd1306 import
+SSD1306_I2C`), not package-relative. The module is named display_config,
+not config, because when display/ is wired into smart_glass_server.py the
+flat board directory also holds firmware/config.py -- two modules both
+named config.py in the same flat directory would shadow each other (see
+docs/DEV_HISTORY.md 4-3).
 """
 
-import config
+import display_config as config
 
 
 def _log(msg):

@@ -2,7 +2,15 @@
 
 기존 main.py는 그대로 둔다 (손 추적 단독 실행용). 이 파일은 같은 AI
 추론 결과를 손 추적/마우스 제어(main.py와 동일), 디스플레이 OSD 표시,
-웹 MJPEG 스트리밍 세 곳에서 공유하는 통합 진입점이다.
+웹 MJPEG 스트리밍, VLT-OL016 OLED 손 관절 스켈레톤 표시 네 곳에서
+공유하는 통합 진입점이다. OLED 경로(FEATURE_DISPLAY_OLED)는 display/의
+독립 모듈(oled_device/display_ui, 평탄화 배포)을 그대로 가져다 쓰며,
+display/examples/*_demo.py의 더미 합성 데이터가 아니라 매 프레임
+hand_tracker.py가 낸 실제 21개 관절 좌표를 그대로 넘긴다(docs/DEV_HISTORY.md
+4-3 "실제 AI 추론 루프 연결 방법 분석" 참고). 2026-10-26 기준: OLED
+자체의 I2C bring-up/화면 출력은 실기기로 검증됐지만, 이 통합 경로
+(hand_tracker -> smart_glass_server.py -> DisplayUI)는 아직 실기기 검증
+전이다.
 
 기능별 ON/OFF 스위치는 아래 FEATURE_* 상수로 제어한다. 꺼진 기능은
 관련 리소스(카메라 채널, Display, UART, 소켓)를 아예 생성하지 않는다.
@@ -51,6 +59,18 @@ import ui
 import web_server
 import video_stream
 
+# OLED(VLT-OL016) 손 관절 스켈레톤 표시 -- display/의 독립 모듈(평탄화
+# 배포, docs/DEV_HISTORY.md 4-3 참고). 모듈이 이 run에 배포되지 않았거나
+# import가 실패해도(예: display/ 없이 firmware/만 올린 구버전 SD카드)
+# 오케스트레이터 전체가 죽어서는 안 되므로 가드한다 -- FEATURE_DISPLAY_OLED
+# 가 켜져 있어도 이 import가 실패하면 OLED만 조용히 비활성화된다.
+try:
+    import oled_device
+    import display_ui
+except ImportError:
+    oled_device = None
+    display_ui = None
+
 
 # ============================================================
 # 기능별 ON/OFF (필요한 처리/메모리 할당까지 끈다)
@@ -59,6 +79,10 @@ import video_stream
 FEATURE_HAND_RECOGNITION = True   # hand_det+handkp_det 추론
 FEATURE_MOUSE_CONTROL = True      # UART2 @MOUSE 송신 (HAND_RECOGNITION 필요)
 FEATURE_DISPLAY_OSD = True        # 기존 HDMI/LCD에 관절 오버레이
+FEATURE_DISPLAY_OLED = True        # VLT-OL016 I2C OLED에 손 관절 스켈레톤 표시
+                                    # (OSD와는 별개의 물리 디스플레이 -- 동시에 켤 수 있다.
+                                    # oled_device/display_ui가 배포 안 됐거나 open_display()가
+                                    # 실패하면(패널 미연결 등) 자동으로 비활성화되며 크래시하지 않는다.)
 # 2026-10-21 1단계(채널0+2, 웹 OFF) 실기기 검증 성공, 재검증(270+프레임,
 # FPS~20, 메모리 안정)도 완료. 2단계 재시도: 이번엔 핫스팟을 켠 상태에서
 # 진행한다(이전 시도는 핫스팟이 꺼진 상태였고, 그것이 원인이었는지가
@@ -413,6 +437,8 @@ def main(transport_kind=None, enable_web=None):
     tracker = None
     web_state = None
     wlan = None
+    oled = None
+    oled_ui = None
 
     try:
         rig.create(
@@ -429,6 +455,18 @@ def main(transport_kind=None, enable_web=None):
             hand_kp_model = "/sdcard/examples/kmodel/handkp_det.kmodel"
             tracker = HandTracker(hand_det_model, hand_kp_model, AI_RGB888P_SIZE)
             gesture_controller = GestureController(AI_RGB888P_SIZE)
+
+        if FEATURE_DISPLAY_OLED:
+            if oled_device is not None and display_ui is not None:
+                oled = oled_device.open_display()
+                if oled is not None:
+                    oled_ui = display_ui.DisplayUI(oled)
+                else:
+                    log("OLED open_display() returned None -- OLED display disabled "
+                        "for this run (see [OLED] log above for the reason)")
+            else:
+                log("OLED modules (oled_device/display_ui) not deployed -- "
+                    "OLED display disabled for this run")
 
         ifconfig = None
         banner_lines = []
@@ -511,6 +549,12 @@ def main(transport_kind=None, enable_web=None):
         if FEATURE_HAND_RECOGNITION:
             banner_lines.append("[AI] Gesture tracking started")
 
+        if FEATURE_DISPLAY_OLED:
+            banner_lines.append(
+                "[OLED] display ready" if oled_ui is not None
+                else "[OLED] not available (disabled for this run)"
+            )
+
         banner_print("========== EdgeGlass-AI ==========")
         for line in banner_lines:
             banner_print(line)
@@ -519,6 +563,7 @@ def main(transport_kind=None, enable_web=None):
         log_mem("STEP: after all init, before loop")
         frame_count = 0
         last_action = None
+        last_fps = None  # 30프레임마다만 갱신, OLED 상태줄에는 그 사이 마지막 값을 보여준다
         loop_start_ms = time.ticks_ms()
 
         while True:
@@ -558,6 +603,12 @@ def main(transport_kind=None, enable_web=None):
                         rig.osd_img.draw_string_advanced(
                             30, 30, 40, "ACTION: " + action,
                             color=(255, 255, 0, 0))
+                    if oled_ui is not None:
+                        # landmarks=None -- hand_renderer.layout_skeleton()
+                        # treats this as "no hand" and draws nothing but the
+                        # status bar (canvas.fill(0) runs first every call),
+                        # so no stale skeleton from a previous frame lingers.
+                        oled_ui.update(None, action, fps=last_fps)
                     if action != last_action:
                         log("ACTION: %s" % action)
                         last_action = action
@@ -572,6 +623,12 @@ def main(transport_kind=None, enable_web=None):
                         ui.draw_landmarks(
                             rig.osd_img, det, points,
                             AI_RGB888P_SIZE, rig.display_size)
+                    if oled_ui is not None:
+                        # points is a flat [x0,y0,x1,y1,...,x20,y20] array
+                        # (see hand_tracker.py's HandKeypoint.postprocess());
+                        # hand_renderer expects 21 (x,y) pairs.
+                        oled_landmarks = [(points[i * 2], points[i * 2 + 1]) for i in range(21)]
+                        oled_ui.update(oled_landmarks, action, fps=last_fps)
 
                 if FEATURE_DISPLAY_OSD:
                     rig.refresh_osd()
@@ -583,6 +640,7 @@ def main(transport_kind=None, enable_web=None):
                 gc.collect()
                 elapsed_ms = time.ticks_diff(time.ticks_ms(), loop_start_ms)
                 fps = (frame_count * 1000.0 / elapsed_ms) if elapsed_ms > 0 else 0.0
+                last_fps = fps
                 log_mem("main_loop frame=%d fps=%.1f" % (frame_count, fps))
 
     except KeyboardInterrupt:
@@ -596,6 +654,8 @@ def main(transport_kind=None, enable_web=None):
         # script stops (IDE interrupt, exception, Ctrl-C) while mid-drag.
         if mouse_controller is not None:
             mouse_controller.close()
+        if oled is not None:
+            oled_device.close_display(oled)
         rig.destroy()
         log("cleanup done")
 

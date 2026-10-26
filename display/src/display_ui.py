@@ -15,7 +15,7 @@ firmware/smart_glass_server.py's WEB_STREAM_MIN_INTERVAL_MS throttle
 force extra work into a hot loop more often than needed.
 """
 
-import config
+import display_config as config
 import hand_renderer
 
 try:
@@ -118,7 +118,12 @@ class DisplayUI:
         # real 128px/8px-font row, so this is a deliberately compressed
         # layout for the real pixel budget rather than a literal copy of
         # the mockup text (see DEVELOPMENT.md).
-        label = (gesture or "")[:5].ljust(5)
+        # str.ljust() is not available on this board's MicroPython build
+        # (AttributeError on real hardware, 2026-10-26 -- CPython has it,
+        # which is why this passed PC unit tests but failed on first
+        # real-panel run) -- pad manually instead.
+        label = (gesture or "")[:5]
+        label = label + " " * (5 - len(label))
         canvas.text(label, 0, text_y, 1)
 
         if fps is not None:
