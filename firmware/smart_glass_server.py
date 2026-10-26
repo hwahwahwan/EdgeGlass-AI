@@ -50,7 +50,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from hand_tracker import HandTracker
-from gesture_controller import GestureController, is_fist
+from gesture_controller import GestureController, is_fist, is_one
 from mouse_controller import MouseController
 import config
 import transport
@@ -615,7 +615,8 @@ def main(transport_kind=None, enable_web=None):
                 else:
                     hand_result = (det, points)
                     fist_now = is_fist(points)
-                    info = gesture_controller.update(points, fist_now)
+                    one_now = is_one(points)
+                    info = gesture_controller.update(points, fist_now, one_now)
                     action = info["action"]
                     if mouse_controller is not None:
                         mouse_controller.update(action, info["x"], info["y"])

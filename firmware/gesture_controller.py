@@ -18,6 +18,11 @@ POINTER_D_CUTOFF = 1.0
 DRAG_PALM_ALPHA = 0.45
 DRAG_DEAD_ZONE = 3
 
+# STOP = 검지만 펼치는 "one" 제스처. 오인식 방지를 위해 진입/해제 모두
+# 연속 프레임 조건을 둔다. 실기기 FPS에 맞춰 조정할 수 있도록 상수로 분리.
+ONE_STOP_CONFIRM_FRAMES = 5
+ONE_STOP_RELEASE_FRAMES = 5
+
 
 class OneEuroFilter:
     """One-axis One Euro filter for pixel positions and millisecond ticks."""
@@ -162,6 +167,49 @@ def is_fist(points):
 
 
 # ============================================================
+# 공식 CanMV 방식의 "one" 판정 (hand_keypoint_class.py의 hk_gesture와
+# 동일한 임계값: thr_angle=65, thr_angle_thumb=53, thr_angle_s=49)
+#
+# 검지만 펴고 중지/약지/소지는 접은 모양 -- STOP에 사용한다.
+# ============================================================
+
+def is_one(points):
+
+    angles = []
+
+    for i in range(5):
+
+        j = i * 8
+
+        v1x = float(points[0] - points[j + 4])
+        v1y = float(points[1] - points[j + 5])
+
+        v2x = float(points[j + 6] - points[j + 8])
+        v2y = float(points[j + 7] - points[j + 9])
+
+        angles.append(
+            vector_angle(v1x, v1y, v2x, v2y)
+        )
+
+    for a in angles:
+
+        if a == 65535.0:
+            return False
+
+    # 공식 CanMV "one" 기준: thumb>5, index<49, middle/ring/pinky>65
+    if (
+        angles[0] > 5.0
+        and angles[1] < 49.0
+        and angles[2] > 65.0
+        and angles[3] > 65.0
+        and angles[4] > 65.0
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
 # MOVE / CLICK / DRAG / STOP
 # ============================================================
 
@@ -224,6 +272,15 @@ class GestureController:
         self.click_time = -10000
 
         self.last_seen_ms = None
+
+
+        # ----------------------------------------------------
+        # STOP ("one" 제스처) -- 연속 프레임 기반 진입/해제
+        # ----------------------------------------------------
+
+        self.gesture_stopped = False
+        self.one_streak = 0
+        self.one_release_streak = 0
 
 
         # ----------------------------------------------------
@@ -541,6 +598,11 @@ class GestureController:
 
                 self.action = "DRAG"
 
+            elif self.gesture_stopped:
+
+                # 카메라 조정 중 손 추적이 잠깐 끊겨도 STOP을 유지한다.
+                self.action = "STOP"
+
             else:
 
                 click_elapsed = time.ticks_diff(
@@ -582,6 +644,10 @@ class GestureController:
         self.last_raw_x = None
         self.last_raw_y = None
 
+        self.gesture_stopped = False
+        self.one_streak = 0
+        self.one_release_streak = 0
+
         self.clear_cursor_locks()
 
 
@@ -595,7 +661,8 @@ class GestureController:
     def update(
         self,
         points,
-        fist_now
+        fist_now,
+        one_now=False
     ):
 
         now = time.ticks_ms()
@@ -887,6 +954,98 @@ class GestureController:
             self.clear_cursor_locks()
 
             self.action = "MOVE"
+
+
+        # ====================================================
+        # STOP ("one" 제스처)
+        #
+        # FIST/DRAG는 이미 위에서 분기돼 여기 도달하지 않는다. 핀치
+        # CLICK과 혼동되지 않도록 손가락이 확실히 벌어진 상태(CLICK
+        # 재활성화와 동일한 pinch_off_ratio 기준)에서만 "one" 후보로
+        # 인정한다. 이 블록에서 return하면 아래 CLICK 판정은 건너뛴다 --
+        # STOP 중 CLICK/DRAG가 발생하지 않도록 하는 우선순위 처리.
+        # ====================================================
+
+        one_candidate = (
+            one_now
+            and pinch_ratio > self.pinch_off_ratio
+        )
+
+        if self.gesture_stopped:
+
+            if one_candidate:
+
+                self.one_release_streak = 0
+
+            else:
+
+                self.one_release_streak += 1
+
+
+            if self.one_release_streak >= ONE_STOP_RELEASE_FRAMES:
+
+                # 해제: 현재 손 위치를 새 기준점으로 삼아 첫 이동량을 0으로.
+                self.gesture_stopped = False
+                self.one_streak = 0
+                self.one_release_streak = 0
+
+                self.click_armed = False
+                self.pinch_since = None
+                self.open_since = now
+
+                self.hold_pointer_control(index_x, index_y, now)
+                self.clear_cursor_locks()
+
+                out_x, out_y = self.cursor_or_point(hand_x, hand_y)
+                self.action = "MOVE"
+
+                return self.result(
+                    self.action, out_x, out_y, pinch_ratio, False, False
+                )
+
+
+            # 해제 확정 전 -- 계속 STOP, 커서는 고정(카메라 이동 중에도 유지).
+            self.hold_pointer_control(index_x, index_y, now)
+
+            out_x, out_y = self.cursor_or_point(hand_x, hand_y)
+            self.action = "STOP"
+
+            return self.result(
+                self.action, out_x, out_y, pinch_ratio, False, False
+            )
+
+
+        if one_candidate:
+
+            self.one_streak += 1
+
+            # 진입 대기 중에도 커서는 즉시 고정한다(기존 FIST 후보와 동일
+            # 패턴) -- 대기 중 커서가 불필요하게 움직이는 것을 막는다.
+            self.hold_pointer_control(index_x, index_y, now)
+
+            self.pinch_since = None
+            self.click_anchor_x = None
+            self.click_anchor_y = None
+
+            if self.one_streak >= ONE_STOP_CONFIRM_FRAMES:
+
+                self.gesture_stopped = True
+                self.one_release_streak = 0
+                self.action = "STOP"
+
+            else:
+
+                self.action = "MOVE"
+
+
+            out_x, out_y = self.cursor_or_point(hand_x, hand_y)
+
+            return self.result(
+                self.action, out_x, out_y, pinch_ratio, False, False
+            )
+
+
+        self.one_streak = 0
 
 
         # ====================================================

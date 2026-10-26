@@ -12,7 +12,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from hand_tracker import HandTracker
-from gesture_controller import GestureController, is_fist
+from gesture_controller import GestureController, is_fist, is_one
 from mouse_controller import MouseController
 from ui import draw_hand
 
@@ -255,6 +255,10 @@ if __name__ == "__main__":
                     points
                 )
 
+                one_now = is_one(
+                    points
+                )
+
                 if TRACKING_DIAGNOSTICS:
                     sample = tracking_sample(
                         det, points, tracker.keypoint.crop_params,
@@ -276,7 +280,8 @@ if __name__ == "__main__":
                 info = (
                     gesture_controller.update(
                         points,
-                        fist_now
+                        fist_now,
+                        one_now
                     )
                 )
 
