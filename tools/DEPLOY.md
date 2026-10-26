@@ -50,33 +50,46 @@ mouse bridge를 동시에 켜 둬도 서로 간섭하지 않는다(단, 보드�
 ## 4. 신규 오케스트레이터 배포 대상 (`smart_glass_server.py`를 올릴 때)
 
 `smart_glass_server.py`는 아래 파일들을 **같은 디렉터리에서** import하므로,
-처음 배포하거나 이 중 하나라도 바뀌었다면 전부 같이 올려야 한다:
+처음 배포하거나 이 중 하나라도 바뀌었다면 전부 같이 올려야 한다
+(2026-10-26 기준 최신 목록 — OLED/Wi-Fi/UDP 통합 이후):
 
 - `firmware/smart_glass_server.py`
 - `firmware/hand_tracker.py`
 - `firmware/gesture_controller.py`
 - `firmware/mouse_controller.py`
-- `firmware/ui.py` (이번에 `draw_landmarks` 추가됨)
+- `firmware/ui.py`
 - `firmware/web_server.py`
 - `firmware/video_stream.py`
+- `firmware/transport.py`, `firmware/wifi.py`, `firmware/wifi_credentials.py`,
+  `firmware/discovery.py` (UART/UDP 전송 분리, Wi-Fi 연결, UDP 자동 탐색)
+- `firmware/config.py` (`MOUSE_TRANSPORT`, `MOUSE_UDP_*`,
+  `VERBOSE_ORCHESTRATOR_LOGS` 등 — `smart_glass_server.py`가 실제로
+  import해서 쓴다. "미사용 placeholder"가 아니다)
+- `firmware/display_config.py`, `firmware/ssd1306.py`,
+  `firmware/oled_device.py`, `firmware/hand_renderer.py`,
+  `firmware/display_ui.py` (VLT-OL016 OLED, `display/README.md` 참고)
 
-`firmware/main.py`와 `firmware/config.py`, `firmware/smart_glass.py`는
+`firmware/main.py`(손 추적 단독 실행)와 `firmware/smart_glass.py`는
 `smart_glass_server.py` 실행에 필요하지 않다(단, `main.py`는 보드에서
-지우지 않고 그대로 둔다).
+지우지 않고 그대로 둔다). `firmware/run_uart.py`/`run_wifi.py`/
+`run_uart_web.py`는 위 전부를 import해서 쓰는 실행 진입점이므로, 셋 중
+무엇을 실행하든 위 파일은 전부 배포돼 있어야 한다.
 
 ## 5. `main.py` 실행과 `smart_glass_server.py` 실행의 차이
 
 | | `main.py` | `smart_glass_server.py` |
 |---|---|---|
-| 검증 상태 | 실기기에서 반복 검증됨 | **실기기에서 한 번도 실행된 적 없음** |
-| 카메라 채널 | 0(디스플레이)+2(AI) 2채널 | 0(디스플레이)+1(웹 RGB565)+2(AI) **최대 3채널 — 이 구성 자체가 미검증** |
-| 기능 | 손 추적+마우스 제어+디스플레이 OSD | 위 전부 + 웹 MJPEG 스트리밍, `FEATURE_*` 상수로 개별 on/off |
+| 검증 상태 | 실기기에서 반복 검증됨 | **실기기에서 반복 검증 완료**(카메라+AI+OLED+UART/UDP 마우스+웹서버 전체 조합, `docs/DEV_HISTORY.md` 4-3) |
+| 카메라 채널 | 0(디스플레이)+2(AI) 2채널 | 0(디스플레이)+1(웹 RGB565)+2(AI) 최대 3채널 — **실기기 검증 완료** |
+| 기능 | 손 추적+마우스 제어+디스플레이 OSD | 위 전부 + OLED 손 관절 표시, UART/Wi-Fi(UDP) 마우스 전송 선택, 웹 MJPEG 스트리밍, `FEATURE_*` 상수로 개별 on/off |
 | 동시 실행 | - | `main.py`와 동시에 실행하지 않는다(같은 카메라/UART2 리소스를 쓰므로 충돌) |
 
-**처음 보드에서 돌릴 때는 `FEATURE_WEB_SERVER = False`, `FEATURE_WEB_VIDEO = False`로
+처음 보드에서 돌릴 때는 `FEATURE_WEB_SERVER = False`, `FEATURE_WEB_VIDEO = False`로
 시작해서 `main.py`와 동일한 2채널 구성으로 먼저 손 추적/마우스 제어 동작이
-`main.py`와 같은지 확인한 다음, 웹 기능을 하나씩 켜는 것을 권장한다** (아래
-11번 참고). 코드만 보고 "3채널 동시 구성이 될 것"이라고 가정하지 않는다.
+`main.py`와 같은지 확인한 다음, 웹 기능을 하나씩 켜는 것을 권장한다(아래
+11번 참고) — 다만 이 단계별 순서 자체는 이미 여러 차례 실기기로 끝까지
+검증됐으므로, "될지 안 될지 모르는 미검증 구성"이 아니라 "디버깅이 필요할
+때 되돌아갈 수 있는 순서"로 이해하면 된다.
 
 ## 6. AI 모델 등 필수 자산
 
@@ -197,217 +210,25 @@ shasum -a 256 firmware/<파일>
 핫스팟 고유의 문제인지, 이 정도 거리/환경의 일반적인 2.4GHz 혼잡 문제인지는
 구분되지 않았다.
 
-### 2026-10-21 `smart_glass_server.py` 1단계(채널 0+2, 웹 OFF) 실기기 검증 — 완료
+## 14. 2026-10-21~22 HTTP bind 실패, `MediaManager`/`Display` 충돌, UART `ImportError` — 해결 경위
 
-**실제로 검증된 사실**:
+이 자리에는 원래 2026-10-21~22에 걸친 단계별 디버깅 세션 기록(1단계/2단계
+웹서버 켜기, HTTP bind 실패 원인 추적, UART `ImportError` 수정 등)이 그대로
+남아 있었다. 그 내용은 전부 `docs/DEV_HISTORY.md`의 문제 이력 표(섹션 3,
+#10~#12, #14)로 흡수·정리됐으므로 이 문서에서는 중복 보관하지 않는다
+(2026-10-26 문서 정리). 요점만 남기면:
 
-- `MediaManager.init()`을 `Display.init()`과 같이 호출하면 **보드가 완전히
-  멈춘다**(`ready: false` 고착, USBDBG 응답 끊김, 물리적 전원 재인가로만
-  복구됨 — 소프트 리부트/재연결 시도로는 회복되지 않았다). `media/media.pyi`
-  stub에 `MediaManager.init/deinit`이 "Deprecated media manager
-  initializer/deinitializer"로 명시되어 있고, `libs/PipeLine.py`(main.py가
-  쓰는, 검증된 경로)는 `Display.init()`을 쓸 때 `MediaManager.init()`을
-  전혀 호출하지 않는다. **결론: `Display.init()`을 쓰는 경로에서는
-  `MediaManager.init()`을 호출하지 않는다.** (반대로 `Display.init()` 없이
-  카메라만 쓰는 `experiments/wifi_test/mjpeg_stream_test.py`류 코드는
-  `MediaManager.init()`이 필요하며 실제로 문제없이 동작했다 — 두 경로를
-  혼동하지 않는다.)
-- `from media.media import *`를 `import sys`보다 먼저 두면 와일드카드
-  임포트가 `sys` 이름을 덮어써 `sys.path` 접근 시
-  `AttributeError: 'module' object has no attribute 'path'`가 난다.
-  `main.py`는 `import sys`를 wildcard import 뒤에 둬서 우연히 이 문제를
-  피하고 있었다. **`smart_glass_server.py`도 같은 순서로 수정 완료.**
-- 위 두 가지를 고치고 `FEATURE_WEB_SERVER=False`로 1단계(채널 0 디스플레이
-  + 채널 2 AI, main.py와 동일 구성) 실행 결과: `Sensor()`→`Display.init()`
-  →채널 0/2 설정→`osd_img`/`bind_layer`→`sensor.run()`까지 전 단계가
-  로그로 확인됐고, 이후 메인 루프에서 `ACTION: MOVE`/`ACTION: CLICK` 전환과
-  `CLICK_TX` UART 패킷 송신까지 `main.py`와 동일하게 동작했다. `Ctrl-C`
-  상당(`canmv_stop_script`)으로 중단 시 `finally` 블록의 `rig.destroy()`가
-  정상 호출되어 `[ORCH] cleanup done`까지 깔끔하게 종료됨을 확인했다.
-- 배포한 7개 파일 전부 로컬-보드 SHA-256/바이트 일치를 매 배포마다 재확인했다.
+- `MediaManager.init()`을 `Display.init()`과 같이 호출하면 보드가 완전히
+  멈춘다 — `Display.init()`을 쓰는 경로에서는 `MediaManager.init()`을
+  호출하지 않는다(DEV_HISTORY #11).
+- `from media.media import *`는 `import sys`보다 먼저 두면 `sys` 이름을
+  덮어쓴다 — wildcard import 뒤에 `import sys`를 둔다(DEV_HISTORY #10).
+- HTTP 포트 bind 실패는 핫스팟 꺼짐이 아니라 WLAN/NIC 핸들 초기화 누락이
+  원인이었다 — 웹서버 시작 전 WLAN 핸들을 생성·유지하도록 수정해 해결
+  완료(DEV_HISTORY #12).
+- `run_uart.py`/`run_wifi.py`의 `ImportError`는 `sys.path`에
+  `/sdcard/smart_glass`를 넣지 않아서였다 — `PROJECT_DIR` 삽입 패턴을
+  두 파일에도 추가해 해결 완료(DEV_HISTORY #14).
 
-### 2026-10-21 `smart_glass_server.py` 2단계(채널1 RGB565 추가, 웹서버 ON, 관절 OFF) — 부분 성공 후 보드 무응답
-
-**실제로 검증된 사실 (성공)**:
-
-- **센서 채널 0(YUV420SP)+1(RGB565)+2(RGBP888) 동시 구성은 성공한다.**
-  `log_mem()`으로 확인한 로그: `before sensor chn1 mem_free=3880192` →
-  `sensor chn1 done mem_free=3879744` → `sensor.run() done mem_free=3878144`.
-  행(hang) 없이 전 단계를 통과했고, 채널1 설정 자체는 메모리를 거의
-  쓰지 않는다(448바이트). 이전까지 "가장 위험한 미검증 항목"이었던 3채널
-  동시 구성 자체는 **더 이상 미검증이 아니다.**
-- 1단계에서 확정한 `MediaManager.init()` 회피, import 순서 수정은 3채널
-  구성에서도 그대로 유효했다(같은 수정으로 재발 없음).
-
-**실패**: `sensor.run() done` 로그 이후, 다음 로그(`after all init, before
-loop`)가 전혀 출력되지 않은 채로 보드가 응답하지 않게 됐다(`board_info`가
-한동안 `ready: false`, 이후 `connected: false`까지 진행). 사용자 지시에
-따라 재연결을 반복하지 않고 `canmv_stop_script` 1회, 재연결 1회만 시도한
-뒤 중단했다. 이번에는 **1단계 때의 치명적 행(MediaManager)과 달리 완전
-먹통은 아니었다** — `board_info`가 간헐적으로 `ready: true`를 반환하기도
-했으므로, USB 디버그 채널 자체가 죽은 것은 아니고 실행 중이던 파이썬
-스크립트가 뭔가에 막혀 있었을 가능성이 높다.
-
-**추정(미확정) 원인**: 멈춘 구간에는 `HandTracker()`(kmodel 2개 로딩),
-`MouseController()`(UART2 open), `WebState.start()`(`HttpServer.start()`의
-소켓 bind) 세 가지가 순서대로 있는데, 그 사이 세부 로그를 찍어두지 않아
-**어느 호출에서 멈췄는지는 정확히 특정하지 못했다.** 유력 후보는
-`HttpServer.start()`의 `socket.bind()`다 — 이번 세션은 아이폰 핫스팟이
-꺼진 상태였고, `socket.getaddrinfo("0.0.0.0", port)`/`socket.bind()`가
-Wi-Fi STA가 전혀 연결되지 않은 상태에서 짧은 재시도(최대 20회×500ms) 후
-포기하는 대신 **무기한 대기했을 가능성**이 있다. 다만 kmodel 로딩이
-이번만 유난히 오래 걸렸을 가능성도 배제하지 못한다 — 둘 다 확인하려면
-`HandTracker()` 생성 직후와 `HttpServer.start()` 호출 직전/직후에 각각
-`log()`를 추가해 재검증해야 한다.
-
-**다음 시도 시 권장 변경(아직 적용 안 함)**:
-1. `HandTracker()`/`MouseController()`/`WebState.start()` 각 호출 전후에
-   `log()` 추가.
-2. **Wi-Fi(핫스팟)를 켠 상태에서** 2단계를 재시도해 "핫스팟 꺼짐" 변수를
-   제거하고 비교.
-3. `HttpServer.start()`의 bind 재시도 루프에 전체 상한 시간(예: 5초) 초과 시
-   예외를 던지는 가드를 추가해, 소켓 bind가 실제로 무기한 대기하는지
-   구분 가능하게 만들 것.
-
-**아직 보드에서 전혀 검증하지 않은 것** (코드만 작성됨, 위 미해결 문제로 도달하지 못함):
-
-- `web_server.py`의 논블로킹 `ClientSession` 스텝 방식, `/`·`/snapshot`·`/stream`
-  실제 응답.
-- `smart_glass_server.py`의 AI 추론 루프에 웹 서빙을 끼워 넣었을 때 손 추적
-  FPS/마우스 제어 지연이 어떻게 변하는지.
-- 두 kmodel + 웹 스트리밍 버퍼를 동시에 띄웠을 때 128MB RAM에서 메모리가
-  충분한지(3채널 센서 설정 자체는 메모리를 거의 안 썼지만, kmodel 로딩 +
-  HTTP 서버까지 합쳤을 때는 측정하지 못했다).
-- `FEATURE_WEB_JOINTS=True`(웹 영상 관절 오버레이).
-- 2026-10-21 기준 아이폰 핫스팟 환경에서 실시간 스트리밍이 시연 가능한
-  수준인지(위 §13 관측 결과상 현재는 불가능에 가까움).
-
-### 2026-10-21 (계속) 로컬-보드 재동기화 및 2단계 Wi-Fi ON 재시도 — 새로운 실패 지점 확정
-
-사용자가 USB 전원을 재인가해 보드가 복구됨. 재개 절차:
-
-1. 보드에 남아있던 2단계(웹 ON) 버전과 로컬 복구본(웹 OFF)의 차이를
-   `diff`로 확인 → `FEATURE_WEB_SERVER`/`FEATURE_WEB_VIDEO` 플래그와
-   주석 설명뿐, 다른 의도치 않은 차이 없음을 확인.
-2. 로컬 복구본(웹 OFF)을 보드에 재배포, SHA-256 일치 확인.
-3. **웹 OFF 2채널 재검증 성공**: `sensor.run()`→메인 루프까지 정상,
-   270+프레임 동안 FPS 19.9~20.0, `mem_free` 3920320바이트로 안정(누수
-   없음), `canmv_stop_script`로 깔끔하게 종료(`[ORCH] cleanup done`).
-4. Wi-Fi 연결 확인: 처음엔 `isconnected=False`였고, 단일 `connect()` 호출 +
-   60초 대기로 **`172.20.10.2` 연결 성공**(스캔 시 SSID `i` RSSI -74 확인 후).
-5. 로컬에서 `FEATURE_WEB_SERVER=True`, `FEATURE_WEB_VIDEO=True`로 전환,
-   배포, SHA-256 일치 확인 후 재실행.
-
-**결과 — 이전과 다른, 더 명확한 실패**:
-```
-OSError: HttpServer: bind failed after 20 retries
-```
-- 센서 채널 0+1+2 동시 구성은 이번에도 재현 성공(`sensor.run() done
-  mem_free=3878144`까지 로그 정상 출력).
-- **Wi-Fi가 실제로 연결된 상태(`172.20.10.2`)였는데도 포트 8060
-  `socket.bind()`가 20회(10초) 전부 실패했다.** 지난번 가설("핫스팟이
-  꺼져 있어서 bind가 무기한 대기")은 **반증됨** — 핫스팟은 켜져 있었다.
-- 중요한 차이: 이번엔 **보드가 멈추지 않았다.** `OSError`가 정상적으로
-  올라와 `except BaseException` → `rig.destroy()` → `[ORCH] cleanup done`
-  → `[CanMV] Script failed`까지 깔끔하게 처리되고 보드는 즉시 REPL
-  프롬프트로 복귀했다(`board_info` ready:true 유지). 1단계 때의
-  `MediaManager.init()` 치명적 행(hang)과는 **다른 종류의, 훨씬 다루기
-  쉬운 문제**다.
-
-**추정(미확정) 원인**: `bind()`가 정확히 어떤 `OSError`(errno)로 실패하는지
-아직 모른다 — 기존 `except OSError:`가 예외 내용을 버리고 있었다. 포트
-8060이 이전 실행에서 완전히 해제되지 않았을 가능성, 3채널 센서 구성이
-소켓 계층에 영향을 줬을 가능성, 또는 또 다른 NIC 레이스 변형일 가능성을
-모두 열어두고 있다.
-
-**적용한 조치 (로컬에만 존재, 보드 미배포)**: `firmware/web_server.py`의
-`HttpServer.start()`에서 각 bind 시도의 실제 `OSError`를 `last_err`에
-저장해 최종 실패 메시지에 포함하도록 최소 수정함(재시도 루프 구조나
-타임아웃은 바꾸지 않음). **이 수정은 아직 보드에 배포도, 재테스트도
-하지 않았다** — `git status`에 `M firmware/web_server.py`로 남아 있으며,
-다음 작업자가 배포(해시 검증 포함)부터 시작해야 한다.
-
-현재 로컬-보드 파일 상태(이 섹션 작성 시점):
-- `firmware/smart_glass_server.py`: 로컬=보드 **일치**(`FEATURE_WEB_SERVER=True`,
-  `FEATURE_WEB_VIDEO=True`, `FEATURE_WEB_JOINTS=False`로 보드에 남아있는 상태).
-- `firmware/web_server.py`: 로컬에 `last_err` 로깅 추가, **보드는 구버전
-  그대로(아직 미배포)**.
-
-## 2026-10-22 UART 실기기 실행 오류 원인 분석 및 수정, 신규 파일 배포
-
-**증상**: 사용자가 `run_uart.py`를 실기기에서 실행하자
-`ImportError: no module named 'smart_glass_server'`가 발생. 로컬 자동
-테스트 45개는 모두 통과한 상태였다 — PC 테스트 통과와 실기기 동작은
-별개임을 보여준 사례.
-
-**원인 (둘 다 실제로 재현/확인함)**:
-1. `run_uart.py`/`run_wifi.py`가 `import smart_glass_server`를 호출하기
-   전에 `sys.path`에 `/sdcard/smart_glass`를 넣지 않았다. CanMV는
-   실행 중인 스크립트 자신의 디렉터리를 `sys.path`에 자동으로 넣지
-   않는다(CPython과 다름) — `main.py`와 `smart_glass_server.py`는 이미
-   이 패턴(`PROJECT_DIR` 삽입)으로 우회하고 있었는데, 새 진입점 두 개만
-   빠뜨렸다.
-2. 이번 세션에서 로컬에 추가/수정한 파일들이 **보드에 전혀 올라가 있지
-   않았다**. 보드의 `/sdcard/smart_glass/`에는 `transport.py`, `wifi.py`,
-   `wifi_credentials.py`, `run_uart.py`, `run_wifi.py`가 아예 없었고,
-   `mouse_controller.py`/`config.py`/`smart_glass_server.py`는 transport
-   분리 이전의 구버전이었다.
-
-**수정 및 배포**: `run_uart.py`/`run_wifi.py`에 `PROJECT_DIR` sys.path
-삽입을 추가(기존 두 파일과 동일 패턴). 아래 8개 파일을 CDC
-(`/dev/cu.usbmodem0010000001`, `canmv_board_info`로 `connected: true,
-ready: true` 확인 후 사용)로 배포했다: `transport.py`, `wifi.py`,
-`wifi_credentials.py`, `config.py`, `mouse_controller.py`, `run_uart.py`,
-`run_wifi.py`, `smart_glass_server.py`. 나머지 6개 파일(`main.py`,
-`hand_tracker.py`, `gesture_controller.py`, `ui.py`, `video_stream.py`,
-`web_server.py`)은 보드 내용을 읽어 로컬과 바이트 수·내용이 일치함을
-확인하고 그대로 두었다(불필요한 재배포 방지). UART2
-(`/dev/cu.usbmodem58930597043`, 당시 Mac 브리지가 이미 점유 중)는 배포
-중 전혀 사용하지 않았다.
-
-**해시 검증**: 8개 파일 모두 쓰기 후 재다운로드해 로컬과 바이트 수가
-일치했고, 그중 7개(`transport.py`, `wifi.py`, `wifi_credentials.py`,
-`mouse_controller.py`, `run_uart.py`, `run_wifi.py`, `smart_glass_server.py`)는
-SHA-256까지 일치를 확인했다. `config.py`는 최초 수동 base64 대조에서
-해시가 달라 보여 재확인했는데, UTF-8 재다운로드 내용을 로컬과 다시
-비교하자 완전히 일치했다 — 원인은 긴 base64 문자열을 터미널로 수동
-전사하는 과정의 실수였고, 실제 보드 파일은 처음부터 정상이었다. (다음
-작업자 참고: 대용량 파일 해시 대조는 base64 수동 전사보다 UTF-8
-재다운로드 내용을 그대로 파일로 저장해 비교하는 쪽이 더 안전하다.)
-
-**실기기 검증 (실제로 확인됨)**:
-- `canmv_run_script`로 `transport`/`wifi`/`config`/`mouse_controller`/
-  `smart_glass_server` 5개 모듈을 모두 정상 임포트 확인(`ImportError`
-  재발 없음).
-- `canmv_execute_file("/sdcard/smart_glass/run_uart.py")` 실행 결과:
-  `Sensor()` 생성 → `Display.init() size=[800, 480]` → 채널0/2 설정 →
-  `MediaManager.init() 스킵`(Display 경로이므로 정상) → `sensor.run()` →
-  `[ORCH] EdgeGlass-AI orchestrator START`까지 전 단계 정상 로그 확인.
-  이후 약 330프레임(FPS 10.5~14.3, `mem_free` 약 3.9MB로 안정) 동안 실제
-  손 제스처에 반응해 `ACTION: MOVE`/`STOP`/`DRAG` 전환과
-  `CLICK_TX ms=... packet= @MOUSE|CLICK` UART 송신이 여러 차례 발생했다.
-  Wi-Fi는 전혀 사용하지 않음(요구사항대로 핫스팟 미점등 상태로 진행).
-- `canmv_stop_script()`로 정상 종료, `[ORCH] cleanup done`까지 확인.
-
-**이 과정에서 발견한 별도 버그(수정함)**: `smart_glass_server.py`의
-`finally` 블록이 `mouse_controller.close()`를 호출하지 않고 있었다
-(`main.py`는 이미 호출함). DRAG 도중 스크립트가 중단되면(IDE 인터럽트,
-예외, Ctrl-C) K230 쪽에서 `DRAG_END`/`STOP`을 보내지 않아 Mac 쪽 마우스
-버튼이 눌린 채로 남을 수 있는 안전 공백이었다. 실제로 테스트 중
-`ACTION: DRAG`가 발생한 뒤 `stop_script`로 중단하면서 발견했다. `finally`
-블록에 `mouse_controller.close()` 호출을 추가(`main.py`와 동일 패턴)하고
-재배포, 임포트 재확인까지 완료했다. **DRAG 도중 정확히 중단되는 상황을
-실기기에서 재현해 `DRAG_END`가 실제로 나가는지까지는 확인하지 못했다 —
-다음 검증 항목.**
-
-**미검증 항목 (PASS로 보고하지 않음)**:
-- `run_wifi.py`(Wi-Fi/UDP 경로)는 보드 배포·임포트까지만 확인했고, 핫스팟을
-  켠 실제 연결/UDP 마우스 전송/웹 스트리밍 동작은 이번 세션에서 시도하지
-  않았다(사용자 지시).
-- DRAG 도중 강제 중단 시 `mouse_controller.close()` 수정이 실제로
-  `DRAG_END`를 내보내는지 실기기 재현 미확인.
-- 장시간(수 분 이상) 연속 실행 시 메모리/FPS 추이는 약 30초 구간만
-  관측했고 그 이상은 미확인.
-- Mac 브리지가 이번 테스트의 `CLICK_TX`를 실제로 `CLICK_RX`로 수신했는지는
-  Mac 쪽 터미널을 직접 보지 않아 확인하지 못했다(사용자가 별도로 띄워둔
-  프로세스).
+세부 로그, 실측 수치, 재현 절차가 필요하면 `docs/DEV_HISTORY.md`의 해당
+번호를 참고한다.

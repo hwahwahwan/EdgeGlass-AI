@@ -634,6 +634,49 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
   `is_one()`의 오탐/미탐률, 실제 FPS에서 5프레임 지연의 체감, Mac 커서가
   실제로 고정되는지는 전부 미확인(본 문서 6번 항목 참고).
 
+### 4-5. 레거시 Markdown 문서 정리 (2026-10-26)
+
+- **배경**: 프로젝트 루트/`docs/`/`experiments/`에 누적된 `.md` 문서들이
+  서로 내용이 겹치거나(`PROJECT_STATUS.md`), 이미 이 문서로 흡수된 뒤
+  방치돼 있거나(`docs/WORK_TRACKER.md`), 머지된 기능의 사전 검증
+  체크리스트로만 쓰이고 끝난 것(`docs/WIFI_AUTO_DISCOVERY_TESTING.md`)이
+  섞여 있었다. `README.md`/`DEV_HISTORY.md` 중심으로 문서 구조를
+  간결하게 하기 위해 전체를 조사·분류함.
+- **삭제함(바로 삭제, 병합 불필요 — 확인됨)**:
+  - `PROJECT_STATUS.md`: 2026-10-06 시점 MOVE 알고리즘 조사 스냅샷. 핵심
+    내용(중립점 속도 방식 폐기, One Euro Filter 도입)이 이미 본 문서
+    10-2/10-3에 diff 기반으로 더 정확하게 기록돼 있어 중복이었다.
+  - `docs/WORK_TRACKER.md`(909줄): A~N절의 세션별 인수인계 기록. 문제
+    이력 표(섹션 3) #10~#21과 섹션 4-2 설계 결정이 이미 이 파일의 K/L/M/N절
+    내용을 흡수한 상태였음을 교차 확인(특히 N-5절이 "DEV_HISTORY.md
+    문제 #20·#21... 갱신했다"고 스스로 기록해 둔 것으로 확인됨) — 전부
+    흡수된 뒤 방치된 staging 문서였다.
+  - `docs/WIFI_AUTO_DISCOVERY_TESTING.md`: 별도 worktree
+    (`feature/wifi-auto-discovery`)의 머지 전 실기기 검증 체크리스트.
+    해당 기능은 이미 main에 머지·실기기 검증 완료(본 문서 #15/#17/#18,
+    4-2)되어 "아직 검증 안 됨"이라는 문서 내용 자체가 현재는 틀린
+    상태였다.
+- **유지하되 오래된 부분만 수정함**:
+  - `tools/DEPLOY.md`: "config.py는 미사용", "smart_glass_server.py는
+    실기기 미검증"이라는 틀린 문장을 수정하고, 신규 오케스트레이터
+    배포 대상 목록에 빠져 있던 `transport.py`/`wifi.py`/`discovery.py`/
+    OLED 5개 모듈을 추가. 본 문서 #10~#12/#14와 중복되던 2026-10-21~22
+    상세 디버깅 로그(약 190줄)는 요약 + 문제 번호 참조로 교체.
+  - `display/DEVELOPMENT.md`: "보드 테스트 전혀 못함"/"다음 세션 질문"으로
+    끝나던 부분이 실제로는 이미 해결된 상태(2026-10-26 실기기 검증
+    완료)였어서, 각 질문에 실제 결과를 추가.
+  - `experiments/wifi_test/WIFI_TEST_REPORT.md`: 유효한 API 호환성
+    레퍼런스라 유지하되, "Wi-Fi 경유 재검증 보류"/"UART→Wi-Fi 대체 비권장"
+    같이 이후 실제로 완료된 항목에 결과를 덧붙임(기존 서술은 "작성 당시
+    기준"으로 명시해 보존).
+  - `AGENTS.md`(git 미추적, 로컬 전용 — 다른 에이전트 툴용으로 추정):
+    삭제한 `docs/WORK_TRACKER.md`를 가리키던 참조 3곳을
+    `docs/DEV_HISTORY.md`로 교체.
+- **그대로 유지함(수정 없음)**: `README.md`, `../시연용_README.md`(별도
+  검토 완료), `tools/autorun/README.md`, `display/README.md`,
+  `archive/st7789_lcd/README.md`(이미 "보관 이유"가 명시된 모범적인
+  아카이브 문서) — 전부 현재 상태와 일치해 수정할 내용이 없었다.
+
 ## 5. 실패했던 접근 방식과 교훈
 
 - `wlan.connect()` 반복 호출은 연결을 빠르게 만들지 않고 handshake를 깨뜨렸다.
