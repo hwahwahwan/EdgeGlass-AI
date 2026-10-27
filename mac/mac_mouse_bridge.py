@@ -20,6 +20,11 @@ ACK_PREFIX = "@ACK|"
 DEFAULT_UART2_PORT = "/dev/cu.usbmodem58930597043"
 DEFAULT_UDP_BIND_HOST = "0.0.0.0"
 DEFAULT_UDP_PORT = 9000
+# Matches firmware/smart_glass_server.py's WEB_PORT. The two processes run on
+# separate machines (board vs Mac) with no shared config file, so this is
+# kept in sync by convention rather than import -- override with --web-port
+# if the board's WEB_PORT is ever changed.
+DEFAULT_WEB_PORT = 8060
 # How often a repeated "couldn't parse this line" diagnostic is allowed to
 # print, so a persistently garbled link doesn't flood the terminal.
 PARSE_FAIL_LOG_INTERVAL_S = 2.0
@@ -291,8 +296,24 @@ def _reply_to_hello(sock, addr, on_registered):
         on_registered(addr)
 
 
+def _announce_web_urls(board_ip, web_port):
+    """Print the board's web server URLs once its address is known."""
+    print("[WEB] Main:     http://%s:%d/" % (board_ip, web_port))
+    print("[WEB] Stream:   http://%s:%d/stream" % (board_ip, web_port))
+    print("[WEB] Snapshot: http://%s:%d/snapshot" % (board_ip, web_port))
+
+
 def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_ticks=None,
-                  poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S, on_board_registered=None):
+                  poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S, on_board_registered=None,
+                  on_board_seen=None):
+    """``on_board_seen(addr)`` fires for either a discovery probe (``@HELLO``)
+    or any datagram that passes the existing ``parse_message()`` validation
+    -- i.e. a real board, whether it registered via auto-discovery or is
+    sending straight to a fixed configured IP (no ``@HELLO`` in that mode).
+    Separate from ``on_board_registered`` so existing discovery/"[MOUSE]
+    Ready" behavior is untouched; this callback is only used to announce the
+    web server URLs (see main()) once per board IP.
+    """
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -312,6 +333,12 @@ def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_tic
 
             if data and data.startswith(HELLO_PREFIX.encode()):
                 _reply_to_hello(sock, addr, on_board_registered)
+                if on_board_seen is not None:
+                    on_board_seen(addr)
+            elif data and on_board_seen is not None:
+                line = data.decode("utf-8", "replace")
+                if parse_message(line) is not None:
+                    on_board_seen(addr)
 
             process_tick(data, mouse, tracking_logger, watchdog)
 
@@ -455,6 +482,13 @@ def main():
         help="Local UDP port to listen on, used when --transport=udp (default: %(default)s)."
     )
     parser.add_argument(
+        "--web-port",
+        type=int,
+        default=DEFAULT_WEB_PORT,
+        help="Board's web server port, used only to print its URL once the "
+             "board's IP is known via --transport=udp (default: %(default)s)."
+    )
+    parser.add_argument(
         "--drag-timeout",
         type=float,
         default=DEFAULT_DRAG_TIMEOUT_S,
@@ -520,8 +554,17 @@ def main():
                     print("[DISCOVERY] Board registered: %s" % board_ip)
                     print("[MOUSE] Ready")
 
+            web_url_state = {"board_ip": None}
+
+            def _on_board_seen(addr, _state=web_url_state):
+                board_ip = addr[0]
+                if board_ip != _state["board_ip"]:
+                    _state["board_ip"] = board_ip
+                    _announce_web_urls(board_ip, args.web_port)
+
             run_udp_loop(args.udp_bind_host, args.udp_port, mouse, tracking_logger, watchdog,
-                         poll_timeout_s=poll_timeout_s, on_board_registered=_on_board_registered)
+                         poll_timeout_s=poll_timeout_s, on_board_registered=_on_board_registered,
+                         on_board_seen=_on_board_seen)
         else:
             print("[UART] Port: %s @ %d baud" % (args.port, args.baud))
             print("[MOUSE] Ready")

@@ -455,6 +455,103 @@ class RunUdpLoopDiscoveryIntegrationTests(unittest.TestCase):
                 board.close()
                 logger.close()
 
+    def test_on_board_seen_fires_for_hello(self):
+        port = _free_udp_port()
+        mouse = mac_mouse_bridge.DryRunMouse()
+        watchdog = mac_mouse_bridge.DragWatchdog(timeout_s=5.0)
+        seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            logger = mac_mouse_bridge.TrackingCsvLogger(directory)
+            thread = threading.Thread(
+                target=mac_mouse_bridge.run_udp_loop,
+                args=("127.0.0.1", port, mouse, logger, watchdog),
+                kwargs={
+                    "max_ticks": 10, "poll_timeout_s": 0.02,
+                    "on_board_seen": lambda addr: seen.append(addr),
+                },
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.05)
+            board = real_socket.socket(real_socket.AF_INET, real_socket.SOCK_DGRAM)
+            try:
+                board.settimeout(2)
+                board.sendto(b"@HELLO|k230\r\n", ("127.0.0.1", port))
+                board.recvfrom(1024)
+                thread.join(timeout=2)
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(seen[0][0], "127.0.0.1")
+            finally:
+                board.close()
+                logger.close()
+
+    def test_on_board_seen_fires_for_valid_mouse_packet_without_hello(self):
+        """Covers the fixed-IP transport, which never sends @HELLO at all."""
+        port = _free_udp_port()
+        mouse = mac_mouse_bridge.DryRunMouse()
+        watchdog = mac_mouse_bridge.DragWatchdog(timeout_s=5.0)
+        seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            logger = mac_mouse_bridge.TrackingCsvLogger(directory)
+            thread = threading.Thread(
+                target=mac_mouse_bridge.run_udp_loop,
+                args=("127.0.0.1", port, mouse, logger, watchdog),
+                kwargs={
+                    "max_ticks": 10, "poll_timeout_s": 0.02,
+                    "on_board_seen": lambda addr: seen.append(addr),
+                },
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.05)
+            board = real_socket.socket(real_socket.AF_INET, real_socket.SOCK_DGRAM)
+            try:
+                board.sendto(b"@MOUSE|MOVE|0.5000|0.5000\r\n", ("127.0.0.1", port))
+                thread.join(timeout=2)
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(seen[0][0], "127.0.0.1")
+            finally:
+                board.close()
+                logger.close()
+
+    def test_on_board_seen_does_not_fire_for_invalid_packet(self):
+        port = _free_udp_port()
+        mouse = mac_mouse_bridge.DryRunMouse()
+        watchdog = mac_mouse_bridge.DragWatchdog(timeout_s=5.0)
+        seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            logger = mac_mouse_bridge.TrackingCsvLogger(directory)
+            thread = threading.Thread(
+                target=mac_mouse_bridge.run_udp_loop,
+                args=("127.0.0.1", port, mouse, logger, watchdog),
+                kwargs={
+                    "max_ticks": 10, "poll_timeout_s": 0.02,
+                    "on_board_seen": lambda addr: seen.append(addr),
+                },
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.05)
+            board = real_socket.socket(real_socket.AF_INET, real_socket.SOCK_DGRAM)
+            try:
+                board.sendto(b"not a protocol line at all\r\n", ("127.0.0.1", port))
+                thread.join(timeout=2)
+                self.assertEqual(seen, [])
+            finally:
+                board.close()
+                logger.close()
+
+
+class AnnounceWebUrlsTests(unittest.TestCase):
+    def test_prints_main_stream_snapshot_urls(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mac_mouse_bridge._announce_web_urls("172.20.10.2", 8060)
+        output = buf.getvalue()
+        self.assertIn("[WEB] Main:     http://172.20.10.2:8060/", output)
+        self.assertIn("[WEB] Stream:   http://172.20.10.2:8060/stream", output)
+        self.assertIn("[WEB] Snapshot: http://172.20.10.2:8060/snapshot", output)
+
 
 if __name__ == "__main__":
     unittest.main()
