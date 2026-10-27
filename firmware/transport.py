@@ -150,6 +150,64 @@ class AutoDiscoverUdpTransport:
             pass
 
 
+class RegisteredUdpTransport:
+    """UDP transport whose destination is learned from an HTTP registration,
+    not discovered by the board scanning its own subnet.
+
+    Replaces AutoDiscoverUdpTransport's board-initiated unicast scan with a
+    Mac-initiated flow: the Mac bridge finds this board over TCP (HTTP
+    GET /device-info) and POSTs /register with its own UDP listen port.
+    smart_glass_server.py's web route calls ``register(ip, port)`` once that
+    POST is verified; until then ``write()`` is a no-op, matching
+    AutoDiscoverUdpTransport's "never send to a guessed address" rule.
+    No scanning, no probe bursts, no step() -- there is nothing to poll.
+    """
+
+    def __init__(self, retry_attempts=20, retry_delay_ms=500, socket_module=None):
+        self._socket_module = socket_module or __import__("socket")
+        self.sock = self._open_socket(retry_attempts, retry_delay_ms)
+        self.peer = None
+        self.on_registered = None  # optional callback(peer) set by caller
+
+    def _open_socket(self, retry_attempts, retry_delay_ms):
+        # Same soft-reboot NIC race as UdpTransport._connect() above.
+        last_error = None
+        for _ in range(retry_attempts):
+            try:
+                sock = self._socket_module.socket(
+                    self._socket_module.AF_INET, self._socket_module.SOCK_DGRAM
+                )
+                sock.setblocking(False)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                _sleep_ms(retry_delay_ms)
+        raise OSError("UDP transport setup failed: %r" % (last_error,))
+
+    def register(self, ip, port):
+        """Record/replace the Mac bridge's address, confirmed via HTTP /register."""
+        previous = self.peer
+        self.peer = (ip, port)
+        if previous != self.peer and self.on_registered is not None:
+            self.on_registered(self.peer)
+
+    def write(self, message):
+        if self.peer is None:
+            # Not registered yet -- never send to a guessed address.
+            return
+        data = message.encode() if isinstance(message, str) else message
+        try:
+            self.sock.sendto(data, self.peer)
+        except OSError:
+            pass
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 def _sleep_ms(ms):
     if hasattr(time, "sleep_ms"):
         time.sleep_ms(ms)
@@ -174,8 +232,16 @@ def create_transport(kind, uart=None, udp_host=None, udp_port=None,
                       udp_retry_attempts=20, udp_retry_delay_ms=500,
                       socket_module=None, udp_auto_discover=False,
                       udp_discovery_ip=None, udp_discovery_netmask=None,
-                      udp_max_scan_hosts=64):
+                      udp_max_scan_hosts=64, udp_use_http_registration=False):
     """Build the transport named by config.MOUSE_TRANSPORT.
+
+    ``udp_use_http_registration`` (config.MOUSE_UDP_USE_HTTP_REGISTRATION)
+    picks RegisteredUdpTransport: the board does no scanning at all, and the
+    Mac bridge finds it over TCP (HTTP GET /device-info) and POSTs /register
+    with its own UDP port. This takes priority over ``udp_auto_discover``
+    when both happen to be set, and ignores udp_host/udp_port/discovery_ip
+    /discovery_netmask/max_scan_hosts entirely -- they only matter to the
+    two branches below.
 
     ``udp_auto_discover`` switches the "udp" kind from the fixed-IP
     UdpTransport to AutoDiscoverUdpTransport (config.MOUSE_UDP_AUTO_DISCOVER).
@@ -196,6 +262,12 @@ def create_transport(kind, uart=None, udp_host=None, udp_port=None,
     if kind == "uart":
         return UartTransport(uart=uart)
     if kind == "udp":
+        if udp_use_http_registration:
+            return RegisteredUdpTransport(
+                retry_attempts=udp_retry_attempts,
+                retry_delay_ms=udp_retry_delay_ms,
+                socket_module=socket_module,
+            )
         if udp_auto_discover:
             if not udp_discovery_ip or not udp_discovery_netmask:
                 raise ValueError(

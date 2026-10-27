@@ -10,13 +10,26 @@ MOUSE_TRANSPORT = "uart"
 # 리스너의 포트와 일치해야 한다(기본 9000, 양쪽 기본값이 이미 같다).
 MOUSE_UDP_PORT = 9000
 
-# True(기본): Mac IP를 고정값으로 쓰지 않고, 보드 자신의 서브넷을 스캔해
-# @HELLO/@ACK 핸드셰이크로 Mac을 자동으로 찾는다(firmware/discovery.py).
-# 핫스팟은 재연결마다 Mac에 새 IP를 주므로 고정 IP는 금방 틀려진다.
-# False로 끄면 아래 MOUSE_UDP_HOST 고정 주소로 보내는 예전 방식으로
-# 되돌아간다 — 자동 탐색이 안 되는 환경(서브넷이 너무 크거나 실패)의
-# 수동 대안.
+# 아래 MOUSE_UDP_USE_HTTP_REGISTRATION이 True면 이 값은 무시된다(신규
+# 기본 경로가 우선). MOUSE_UDP_USE_HTTP_REGISTRATION=False로 끈 경우에만
+# 쓰이는 옛 방식: True면 Mac IP를 고정값으로 쓰지 않고, 보드 자신의
+# 서브넷을 스캔해 @HELLO/@ACK 핸드셰이크로 Mac을 자동으로 찾는다
+# (firmware/discovery.py). 핫스팟은 재연결마다 Mac에 새 IP를 주므로 고정
+# IP는 금방 틀려진다. False로 끄면 아래 MOUSE_UDP_HOST 고정 주소로 보내는
+# 더 예전 방식으로 되돌아간다 — 자동 탐색이 안 되는 환경(서브넷이 너무
+# 크거나 실패)의 수동 대안.
 MOUSE_UDP_AUTO_DISCOVER = True
+
+# True(기본, 2026-10-27부터): 보드가 자기 서브넷을 스캔하지 않는다. 대신
+# Mac 브리지가 TCP 8060으로 보드를 찾아(GET /device-info, EDGEGLASS_BOARD
+# 식별) POST /register로 자신의 UDP 포트를 알려주면, 보드는 그 요청의
+# 송신자 IP+포트를 목적지로 저장한다(RegisteredUdpTransport). 아래
+# MOUSE_UDP_AUTO_DISCOVER/MOUSE_UDP_HOST 기반의 보드측 unicast 스캔
+# 방식(AutoDiscoverUdpTransport)보다 이 값이 우선하며, 253-host 가정용
+# Wi-Fi에서도 보드측 스캔이 전혀 필요 없다. False로 끄면 아래 옛 방식으로
+# 되돌아간다 -- discovery.py/AutoDiscoverUdpTransport 자체는 삭제하지
+# 않고 그대로 남겨뒀다(문서/테스트 참고용 겸 수동 대안).
+MOUSE_UDP_USE_HTTP_REGISTRATION = True
 
 # 자동 탐색이 서브넷 크기 때문에 실패했을 때(아래 MOUSE_UDP_MAX_SCAN_HOSTS
 # 참고 — 가정용 /24처럼 호스트가 64개보다 많은 경우) 자동으로 쓰이는 고정

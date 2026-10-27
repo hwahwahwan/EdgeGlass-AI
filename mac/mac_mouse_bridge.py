@@ -11,6 +11,7 @@ from datetime import datetime
 import glob
 import os
 import sys
+import threading
 import time
 
 PREFIX = "@MOUSE|"
@@ -25,6 +26,24 @@ DEFAULT_UDP_PORT = 9000
 # kept in sync by convention rather than import -- override with --web-port
 # if the board's WEB_PORT is ever changed.
 DEFAULT_WEB_PORT = 8060
+# EdgeGlass-AI 네트워크 자동 탐색/상호 식별 (2026-10-27): 보드는 더 이상 자기
+# 서브넷을 스캔하지 않는다 -- 이 Mac이 능동적으로 TCP WEB_PORT로 보드를 찾고
+# (GET /device-info, 식별 문자열 확인), POST /register로 자신의 UDP 포트를
+# 알려준다. 암호화/인증이 아니라 다른 장치와 혼동하지 않기 위한 식별용 문자열.
+DEVICE_INFO_PATH = "/device-info"
+REGISTER_PATH = "/register"
+BOARD_IDENTITY = "EDGEGLASS_BOARD"
+USER_IDENTITY = "EDGEGLASS_USER"
+# 후보 호스트 하나당 TCP 탐색 타임아웃 -- 짧게 잡아야 응답 없는 호스트
+# (리스너 없음/방화벽) 때문에 /24(254개 호스트) 스캔이 몇 분씩 걸리지 않는다.
+SCAN_CONNECT_TIMEOUT_S = 0.3
+# ThreadPoolExecutor의 워커 수 상한 -- 소켓 connect()는 블로킹이라 동시
+# 워커 수로 전체 스캔 시간이 대략 (호스트 수 / SCAN_MAX_WORKERS) *
+# SCAN_CONNECT_TIMEOUT_S로 제한된다(보드가 없는 최악의 경우).
+SCAN_MAX_WORKERS = 32
+REGISTER_TIMEOUT_S = 2.0
+# 보드를 아직 못 찾았거나(또는 로컬 IP 변경으로 재탐색할 때) 재시도 간격.
+DISCOVERY_RETRY_INTERVAL_S = 5.0
 # How often a repeated "couldn't parse this line" diagnostic is allowed to
 # print, so a persistently garbled link doesn't flood the terminal.
 PARSE_FAIL_LOG_INTERVAL_S = 2.0
@@ -234,8 +253,14 @@ def _log_parse_failure(line):
     print("PARSE_FAIL", "line=%r" % (line,), file=sys.stderr)
 
 
-def handle_line(line, mouse, tracking_logger):
-    """Parse and dispatch exactly one decoded protocol line."""
+def handle_line(line, mouse, tracking_logger, on_mouse_packet=None):
+    """Parse and dispatch exactly one decoded protocol line.
+
+    ``on_mouse_packet()``, if given, fires on every line that parses as a
+    valid @MOUSE action (MOVE/CLICK/DRAG*/STOP alike) -- main() uses this,
+    deduped to the first call only, for the concise "[UDP] 마우스 패킷
+    수신 시작" status line.
+    """
     if line.startswith(TRACK_PREFIX):
         tracking_logger.write(parse_tracking(line))
         return
@@ -248,13 +273,15 @@ def handle_line(line, mouse, tracking_logger):
     if message is None:
         _log_parse_failure(line)
         return
+    if on_mouse_packet is not None:
+        on_mouse_packet()
     if message[0] in _LOGGED_ACTIONS:
         print("%s_RX" % message[0], "time=", time.time(),
               "packet=@MOUSE|%s" % message[0], flush=True)
     dispatch(mouse, message)
 
 
-def process_tick(raw, mouse, tracking_logger, watchdog):
+def process_tick(raw, mouse, tracking_logger, watchdog, on_mouse_packet=None):
     """One receive-loop step, shared by the UART and UDP readers.
 
     ``raw`` is the newly received bytes for this tick, or falsy if nothing
@@ -264,7 +291,7 @@ def process_tick(raw, mouse, tracking_logger, watchdog):
     if raw:
         watchdog.mark_received()
         line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-        handle_line(line, mouse, tracking_logger)
+        handle_line(line, mouse, tracking_logger, on_mouse_packet=on_mouse_packet)
     watchdog.check(mouse)
 
 
@@ -303,9 +330,266 @@ def _announce_web_urls(board_ip, web_port):
     print("[WEB] Snapshot: http://%s:%d/snapshot" % (board_ip, web_port))
 
 
+def _hexmask_to_dotted(hexmask):
+    """Convert macOS ifconfig's '0xffffff00'-style netmask to dotted form."""
+    value = int(hexmask, 16)
+    return "%d.%d.%d.%d" % (
+        (value >> 24) & 0xFF, (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+
+
+def get_local_ip_and_netmask(ip=None):
+    """Return (ip, netmask) for this Mac's current outbound interface.
+
+    ``ip`` lets a caller reuse an already-known get_local_ip() result
+    instead of probing twice. The netmask comes from parsing `ifconfig`
+    (stdlib-only subprocess call, no extra dependency) for the line
+    matching that same IP; returns (ip, None) if ifconfig is unavailable or
+    the IP isn't found there (non-macOS, odd network setup), so a caller
+    can treat "no netmask" as "can't scan" instead of crashing.
+    """
+    import subprocess
+
+    local_ip = get_local_ip() if ip is None else ip
+    if local_ip is None:
+        return None, None
+    try:
+        output = subprocess.check_output(["ifconfig"], text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return local_ip, None
+    for line in output.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "inet" and parts[1] == local_ip and "netmask" in parts:
+            hexmask = parts[parts.index("netmask") + 1]
+            try:
+                return local_ip, _hexmask_to_dotted(hexmask)
+            except ValueError:
+                return local_ip, None
+    return local_ip, None
+
+
+def _ip_to_int(ip):
+    parts = [int(part) for part in ip.split(".")]
+    value = 0
+    for part in parts:
+        value = (value << 8) | part
+    return value
+
+
+def _int_to_ip(value):
+    return "%d.%d.%d.%d" % (
+        (value >> 24) & 0xFF, (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+
+
+def compute_subnet_hosts(ip, netmask):
+    """Return every other host address on ip's subnet, own address excluded.
+
+    Mac-side counterpart of firmware/discovery.py's compute_scan_targets(),
+    deliberately not imported from there -- mac/ stays independent of
+    firmware/ (see /CLAUDE.md directory separation), and this one has no
+    host-count cap: the board does no scanning at all any more, only the
+    Mac does, with bounded concurrency (see scan_for_board()).
+    """
+    ip_int = _ip_to_int(ip)
+    mask_int = _ip_to_int(netmask)
+    network = ip_int & mask_int
+    inverse = (~mask_int) & 0xFFFFFFFF
+    if inverse <= 1:
+        return []
+    hosts = []
+    for offset in range(1, inverse):
+        candidate = network + offset
+        if candidate == ip_int:
+            continue
+        hosts.append(_int_to_ip(candidate))
+    return hosts
+
+
+def _http_exchange(ip, port, request_bytes, timeout_s):
+    """Send one HTTP/1.1 request over a fresh TCP connection, return the raw
+    response bytes, or None on any connect/timeout/read error."""
+    import socket as socket_module
+    try:
+        with socket_module.create_connection((ip, port), timeout=timeout_s) as sock:
+            sock.settimeout(timeout_s)
+            sock.sendall(request_bytes)
+            chunks = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except (OSError, socket_module.timeout):
+        return None
+    return b"".join(chunks) or None
+
+
+def _http_response_body(raw):
+    if raw is None:
+        return None
+    _head, _sep, body = raw.partition(b"\r\n\r\n")
+    return body
+
+
+def probe_board(ip, port, timeout_s=SCAN_CONNECT_TIMEOUT_S):
+    """True iff ip:port answers GET /device-info with identity=EDGEGLASS_BOARD.
+
+    A bare TCP connect succeeding is not enough to call this the board --
+    some other device/service could be listening on that port too, so the
+    identity string in the response body is what actually confirms it
+    (see firmware/smart_glass_server.py's /device-info route).
+    """
+    import json as json_module
+
+    request = (
+        "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" % (DEVICE_INFO_PATH, ip)
+    ).encode()
+    body = _http_response_body(_http_exchange(ip, port, request, timeout_s))
+    if not body:
+        return False
+    try:
+        payload = json_module.loads(body.decode())
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("identity") == BOARD_IDENTITY
+
+
+def register_with_board(board_ip, board_port, udp_port, timeout_s=REGISTER_TIMEOUT_S):
+    """POST /register; True iff the board confirms EDGEGLASS_REGISTERED."""
+    import json as json_module
+
+    body = json_module.dumps({"identity": USER_IDENTITY, "udp_port": udp_port}).encode()
+    request = (
+        "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"
+        "Content-Length: %d\r\nConnection: close\r\n\r\n" % (REGISTER_PATH, board_ip, len(body))
+    ).encode() + body
+    resp_body = _http_response_body(_http_exchange(board_ip, board_port, request, timeout_s))
+    if not resp_body:
+        return False
+    try:
+        payload = json_module.loads(resp_body.decode())
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("identity") == BOARD_IDENTITY
+        and payload.get("status") == "EDGEGLASS_REGISTERED"
+    )
+
+
+def scan_for_board(local_ip, netmask, port, prefer_ip=None,
+                    timeout_s=SCAN_CONNECT_TIMEOUT_S, max_workers=SCAN_MAX_WORKERS):
+    """Return the board's IP on this subnet, or None if nothing answered.
+
+    Checks ``prefer_ip`` (the last address that worked) by itself first --
+    cheap, and usually right after a reconnect -- before falling back to
+    scanning every other host address on the subnet with bounded
+    concurrency (never the full 254-host /24 sequentially one at a time).
+    """
+    if prefer_ip is not None and probe_board(prefer_ip, port, timeout_s):
+        return prefer_ip
+
+    hosts = compute_subnet_hosts(local_ip, netmask)
+    if prefer_ip in hosts:
+        hosts.remove(prefer_ip)
+    if not hosts:
+        return None
+
+    import concurrent.futures
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {pool.submit(probe_board, ip, port, timeout_s): ip for ip in hosts}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                if future.result():
+                    return futures[future]
+            except Exception:
+                continue
+        return None
+    finally:
+        # wait=False: don't block on in-flight probes once we already have
+        # an answer (or scanned everything) -- cancel_futures drops the
+        # ones that never got a worker thread yet.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def discover_and_register_board(web_port, udp_port, prefer_ip=None,
+                                 timeout_s=SCAN_CONNECT_TIMEOUT_S,
+                                 max_workers=SCAN_MAX_WORKERS, on_status=None):
+    """One discovery attempt: scan this Mac's subnet for the board over TCP,
+    then register this Mac's UDP listen port with it over HTTP. Returns the
+    board's IP on success, None otherwise (the reason goes to ``on_status``).
+    """
+    def _status(msg):
+        if on_status is not None:
+            on_status(msg)
+
+    local_ip, netmask = get_local_ip_and_netmask()
+    if local_ip is None:
+        _status("[DISCOVERY] no local IP route found -- check Wi-Fi/hotspot connection")
+        return None
+    if netmask is None:
+        _status("[DISCOVERY] could not determine subnet mask for %s -- scan skipped" % local_ip)
+        return None
+
+    _status("[DISCOVERY] scanning %s/%s for the board (TCP %d)..." % (local_ip, netmask, web_port))
+    board_ip = scan_for_board(local_ip, netmask, web_port, prefer_ip=prefer_ip,
+                               timeout_s=timeout_s, max_workers=max_workers)
+    if board_ip is None:
+        _status("[DISCOVERY] no device answered %s as %s on this subnet "
+                 "(client/AP isolation on the router or hotspot can also cause this)"
+                 % (DEVICE_INFO_PATH, BOARD_IDENTITY))
+        return None
+
+    _status("[DISCOVERY] board found at %s -- registering (UDP port %d)..." % (board_ip, udp_port))
+    if not register_with_board(board_ip, web_port, udp_port, timeout_s=REGISTER_TIMEOUT_S):
+        _status("[DISCOVERY] board at %s did not confirm EDGEGLASS_REGISTERED" % board_ip)
+        return None
+
+    _status("[DISCOVERY] board registered: %s" % board_ip)
+    return board_ip
+
+
+def _tcp_discovery_loop(web_port, udp_port, prefer_ip=None,
+                         retry_interval_s=DISCOVERY_RETRY_INTERVAL_S,
+                         on_status=None, on_found=None, on_attempt_failed=None,
+                         max_attempts=None):
+    """Retry discover_and_register_board() until it succeeds once, then
+    return. Meant to run in a daemon thread (see main()) so it never blocks
+    run_udp_loop's receiving of mouse packets -- scanning a /24 subnet takes
+    a few seconds, every retry included, and must not stall anything else.
+
+    ``on_attempt_failed(reason)`` fires after each failed attempt with the
+    last status message discover_and_register_board() reported (its last
+    message before returning None is always the actual failure reason) --
+    main() uses this for a deduped, concise "[BOARD] 탐색 실패" line,
+    independent of ``on_status``'s full per-attempt detail (debug-only).
+    """
+    attempts = 0
+    while max_attempts is None or attempts < max_attempts:
+        attempts += 1
+        last_message = {"text": None}
+
+        def _capture_status(msg, _store=last_message):
+            _store["text"] = msg
+            if on_status is not None:
+                on_status(msg)
+
+        board_ip = discover_and_register_board(
+            web_port, udp_port, prefer_ip=prefer_ip, on_status=_capture_status)
+        if board_ip is not None:
+            if on_found is not None:
+                on_found(board_ip)
+            return board_ip
+        if on_attempt_failed is not None:
+            on_attempt_failed(last_message["text"])
+        time.sleep(retry_interval_s)
+    return None
+
+
 def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_ticks=None,
                   poll_timeout_s=MAX_WATCHDOG_POLL_INTERVAL_S, on_board_registered=None,
-                  on_board_seen=None):
+                  on_board_seen=None, on_local_ip_changed=None, on_mouse_packet=None):
     """``on_board_seen(addr)`` fires for either a discovery probe (``@HELLO``)
     or any datagram that passes the existing ``parse_message()`` validation
     -- i.e. a real board, whether it registered via auto-discovery or is
@@ -313,6 +597,17 @@ def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_tic
     Separate from ``on_board_registered`` so existing discovery/"[MOUSE]
     Ready" behavior is untouched; this callback is only used to announce the
     web server URLs (see main()) once per board IP.
+
+    ``on_local_ip_changed(old_ip, new_ip)``, if given, fires whenever this
+    Mac's own IP changes (e.g. a Wi-Fi/hotspot network switch) -- used by
+    main() to trigger a fresh TCP-discovery rescan, since the old
+    registration's peer address may no longer be reachable. All
+    presentation (what to print, if anything) is left to the caller -- this
+    function performs no printing of its own for this event.
+
+    ``on_mouse_packet()``, if given, fires on every tick whose datagram
+    parses as a valid @MOUSE action -- main() dedups this to the first call
+    for the "[UDP] 마우스 패킷 수신 시작" status line.
     """
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -321,7 +616,6 @@ def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_tic
     # Shorter than the drag watchdog timeout so a stale drag is still caught
     # promptly even with no incoming datagrams at all.
     sock.settimeout(poll_timeout_s)
-    print("Listening for UDP on %s:%d. Press Ctrl-C to stop." % (bind_host, bind_port))
     local_ip = get_local_ip()
     try:
         ticks = 0
@@ -340,13 +634,14 @@ def run_udp_loop(bind_host, bind_port, mouse, tracking_logger, watchdog, max_tic
                 if parse_message(line) is not None:
                     on_board_seen(addr)
 
-            process_tick(data, mouse, tracking_logger, watchdog)
+            process_tick(data, mouse, tracking_logger, watchdog, on_mouse_packet=on_mouse_packet)
 
             ticks += 1
             if ticks % LOCAL_IP_RECHECK_TICKS == 0:
                 current_ip = get_local_ip()
                 if current_ip and current_ip != local_ip:
-                    print("[NET] Local IP changed: %s -> %s" % (local_ip, current_ip))
+                    if on_local_ip_changed is not None:
+                        on_local_ip_changed(local_ip, current_ip)
                     local_ip = current_ip
     finally:
         sock.close()
@@ -489,6 +784,19 @@ def main():
              "board's IP is known via --transport=udp (default: %(default)s)."
     )
     parser.add_argument(
+        "--no-tcp-discovery",
+        action="store_true",
+        help="Disable the Mac-initiated TCP scan/HTTP registration (GET /device-info, "
+             "POST /register) and rely only on the board-initiated @HELLO/@ACK path, "
+             "used when --transport=udp (default: enabled)."
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print per-attempt TCP-discovery scan/request detail in addition to the "
+             "default concise [Wi-Fi]/[BOARD]/[UDP] connection-status lines."
+    )
+    parser.add_argument(
         "--drag-timeout",
         type=float,
         default=DEFAULT_DRAG_TIMEOUT_S,
@@ -526,7 +834,13 @@ def main():
         mouse = DryRunMouse() if args.dry_run else QuartzMouse()
 
         print("========== EdgeGlass-AI Mac Bridge ==========")
-        print("[NET] Local IP: %s" % (get_local_ip() or "unknown"))
+        startup_ip = get_local_ip()
+        if startup_ip:
+            print("[Wi-Fi] 네트워크 연결 완료")
+            if args.debug:
+                print("[DEBUG] local IP: %s" % startup_ip)
+        else:
+            print("[Wi-Fi] 연결 실패 - 로컬 네트워크 경로를 찾을 수 없음")
         if args.dry_run:
             print("[PERMISSION] Accessibility: skipped (--dry-run sends no OS events)")
         else:
@@ -541,30 +855,108 @@ def main():
 
         poll_timeout_s = min(MAX_WATCHDOG_POLL_INTERVAL_S, args.drag_timeout / 5.0)
         if args.transport == "udp":
-            print("[UDP] Listening on %s:%d" % (args.udp_bind_host, args.udp_port))
-            print("[DISCOVERY] Waiting for board...")
-            print("=============================================")
+            if args.debug:
+                print("[DEBUG] UDP listening on %s:%d" % (args.udp_bind_host, args.udp_port))
+
+            def _debug_status(msg):
+                if args.debug:
+                    print(msg)
 
             registered_state = {"board_ip": None}
 
             def _on_board_registered(addr, _state=registered_state):
+                # Legacy board-initiated @HELLO/@ACK path (pre-2026-10-27) --
+                # dormant by default now that config.py's
+                # MOUSE_UDP_USE_HTTP_REGISTRATION defaults to True, kept
+                # working for boards still on the old firmware. Detail only
+                # under --debug so it doesn't compete with the new concise
+                # [BOARD] line below for the same real-world event.
                 board_ip = addr[0]
                 if board_ip != _state["board_ip"]:
                     _state["board_ip"] = board_ip
-                    print("[DISCOVERY] Board registered: %s" % board_ip)
-                    print("[MOUSE] Ready")
+                    if args.debug:
+                        print("[DEBUG] legacy @HELLO/@ACK registration: %s" % board_ip)
 
+            # Shared by both discovery paths (old passive @HELLO/@ACK and the
+            # new active TCP scan below) so the [WEB] URL block only ever
+            # prints once per board IP, however it was found.
             web_url_state = {"board_ip": None}
 
-            def _on_board_seen(addr, _state=web_url_state):
-                board_ip = addr[0]
+            def _announce_web_urls_once(board_ip, _state=web_url_state):
                 if board_ip != _state["board_ip"]:
                     _state["board_ip"] = board_ip
+                    print()
                     _announce_web_urls(board_ip, args.web_port)
+
+            def _on_board_seen(addr):
+                _announce_web_urls_once(addr[0])
+
+            # Mac-initiated discovery (2026-10-27): the board no longer scans
+            # its own subnet. This Mac finds it over TCP (GET /device-info)
+            # and confirms it with POST /register before any @MOUSE packet
+            # can even be sent (RegisteredUdpTransport.write() is a no-op
+            # until the board's own HTTP route calls .register()). Runs in a
+            # daemon thread so scanning a /24 subnet never blocks
+            # run_udp_loop's receiving below.
+            tcp_discovery_state = {"last_board_ip": None}
+            board_fail_state = {"last_reason": None}
+
+            def _on_tcp_discovery_found(board_ip, _state=tcp_discovery_state):
+                _state["last_board_ip"] = board_ip
+                board_fail_state["last_reason"] = None
+                print("[BOARD] EdgeGlass-AI 탐색 및 등록 완료")
+                _announce_web_urls_once(board_ip)
+
+            def _on_board_discovery_failed(reason, _state=board_fail_state):
+                # Deduped on the reason text so a retry every
+                # DISCOVERY_RETRY_INTERVAL_S with the SAME cause stays
+                # silent after the first notice; a new/different reason
+                # (or a flip back to failing after a prior success) is
+                # reported again.
+                if reason != _state["last_reason"]:
+                    _state["last_reason"] = reason
+                    # discover_and_register_board()'s on_status messages are
+                    # already prefixed "[DISCOVERY] " for the --debug view;
+                    # strip it here so the concise line doesn't show it twice.
+                    clean_reason = reason
+                    if clean_reason and clean_reason.startswith("[DISCOVERY] "):
+                        clean_reason = clean_reason[len("[DISCOVERY] "):]
+                    print("[BOARD] 탐색 실패 - %s" % (clean_reason or "알 수 없는 오류"))
+
+            def _start_tcp_discovery(_state=tcp_discovery_state):
+                threading.Thread(
+                    target=_tcp_discovery_loop,
+                    args=(args.web_port, args.udp_port),
+                    kwargs={
+                        "prefer_ip": _state["last_board_ip"],
+                        "on_status": _debug_status,
+                        "on_found": _on_tcp_discovery_found,
+                        "on_attempt_failed": _on_board_discovery_failed,
+                    },
+                    daemon=True,
+                ).start()
+
+            def _on_local_ip_changed(old_ip, new_ip):
+                if args.debug:
+                    print("[DEBUG] local IP changed: %s -> %s" % (old_ip, new_ip))
+                if not args.no_tcp_discovery:
+                    print("[Wi-Fi] 네트워크 재연결 완료")
+                    _start_tcp_discovery()
+
+            udp_rx_state = {"started": False}
+
+            def _on_mouse_packet(_state=udp_rx_state):
+                if not _state["started"]:
+                    _state["started"] = True
+                    print("[UDP] 마우스 패킷 수신 시작")
+
+            if not args.no_tcp_discovery:
+                _start_tcp_discovery()
 
             run_udp_loop(args.udp_bind_host, args.udp_port, mouse, tracking_logger, watchdog,
                          poll_timeout_s=poll_timeout_s, on_board_registered=_on_board_registered,
-                         on_board_seen=_on_board_seen)
+                         on_board_seen=_on_board_seen, on_local_ip_changed=_on_local_ip_changed,
+                         on_mouse_packet=_on_mouse_packet)
         else:
             print("[UART] Port: %s @ %d baud" % (args.port, args.baud))
             print("[MOUSE] Ready")

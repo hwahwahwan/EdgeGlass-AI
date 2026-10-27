@@ -805,6 +805,100 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
     구조를 최대한 유지"를 명시해 자동 탐색 확장이나 브로드캐스트
     도입 같은 구조 변경은 시도하지 않았다.
 
+### 4-7. 보드측 unicast 스캔 폐기, Mac 주도 TCP 탐색+HTTP 상호 식별로 전환 (2026-10-27, 로컬 구현·테스트 완료, 실기기 탐색/등록/웹 검증 완료 — UDP 마우스 패킷 수신은 아직 미검증)
+
+- **배경**: 4-2/4-6의 구조적 제약(집 Wi-Fi `/24`에서는
+  `MOUSE_UDP_MAX_SCAN_HOSTS=64` 상한 때문에 보드측 자동 탐색이 애초에
+  불가능해 고정 IP로 fallback하고, Mac의 DHCP 재할당마다 `config.py`를
+  수동 갱신해야 하는 문제, 바로 앞 불릿의 실기기 브로드캐스트 검증
+  실패)를 구조적으로 해결하기 위해, 탐색 주체를 보드에서 Mac으로
+  완전히 뒤집었다.
+- **새 구조**: 보드는 더 이상 자기 서브넷을 스캔하지 않는다
+  (`discovery.py`/`AutoDiscoverUdpTransport`는 코드는 남겨뒀지만 기본
+  경로에서 빠졌다 — `config.MOUSE_UDP_USE_HTTP_REGISTRATION=True`가
+  우선). 대신 Mac(`mac/mac_mouse_bridge.py`)이 자신의 IP/서브넷마스크를
+  확인해(`ifconfig` 파싱, `get_local_ip_and_netmask()`) TCP
+  `WEB_PORT(8060)`로 GET `/device-info`를 보내 `EDGEGLASS_BOARD` 식별
+  문자열을 확인하고(`probe_board()`/`scan_for_board()`,
+  `ThreadPoolExecutor`로 동시성 제한), 찾으면 POST `/register`로
+  `{"identity":"EDGEGLASS_USER","udp_port":9000}`을 보낸다
+  (`register_with_board()`). 보드(`firmware/smart_glass_server.py`의
+  신규 `/device-info`, `/register` 라우트)는 그 요청의 실제 송신자
+  IP(`session.addr[0]`)와 페이로드의 UDP 포트를 받아
+  `RegisteredUdpTransport.register()`로 저장하고 `EDGEGLASS_REGISTERED`를
+  돌려준다 — 그 전까지 `RegisteredUdpTransport.write()`는 아무 것도
+  보내지 않는다(추측 주소로 보내지 않는다는 기존 원칙 유지).
+  identity 문자열은 인증이 아니라 다른 장치와 혼동하지 않기 위한
+  식별용이다.
+- **64-host 상한이 사라지는 이유**: 스캔이 보드가 아니라 Mac에서
+  일어나므로 `MOUSE_UDP_MAX_SCAN_HOSTS` 같은 상한이 필요 없다 — 집
+  Wi-Fi `/24`(254 host)든 핫스팟이든 Mac이 TCP로 모든 host를 bounded
+  concurrency(`SCAN_MAX_WORKERS=32`, host당 타임아웃
+  `SCAN_CONNECT_TIMEOUT_S=0.3s`)로 스캔하는 동일한 코드 경로를 쓴다.
+  이전에 성공했던 보드 IP(`prefer_ip`)를 먼저 확인하고 실패하면 전체
+  스캔으로 넘어간다.
+- **재탐색**: Mac의 로컬 IP가 바뀌면(`run_udp_loop()`의 새
+  `on_local_ip_changed` 콜백) 백그라운드 스레드로 재스캔+재등록을
+  트리거한다. 보드만 IP가 바뀌고 Mac IP는 그대로인 경우(보드 재부팅 등)는
+  이번 구현이 감지하지 못하는 남는 제약으로 인지하고 있다(재시도 간격
+  `DISCOVERY_RETRY_INTERVAL_S=5s`로 최초 탐색 실패 시에는 계속
+  재시도하지만, 한 번 등록된 뒤 보드만 새 IP로 바뀌는 경우는 별도
+  트리거가 없음).
+- **기존 기능 영향 없음 확인(코드 레벨)**: `RegisteredUdpTransport`는
+  `step()`이 없어(스캔 자체가 없으므로) 기존 `AutoDiscoverUdpTransport`의
+  프레임당 polling보다 오히려 가볍다. `/register` 핸들러는 기존
+  `WebState.step()`의 논블로킹 1-프레임-1-시도 구조를 그대로 타고,
+  내부에서 발생하는 모든 예외를 자체적으로 삼켜(`except Exception`)
+  `main()`까지 전파되지 않게 했다 — 그러지 않으면 `WebState.step()`의
+  `except (OSError, ValueError)`가 못 잡는 예외가 카메라/AI/OLED 전체를
+  함께 죽일 수 있었다(검토 중 발견, 구현 시점에 바로 방어 추가).
+  OLED(`display_config.py`/`oled_device.py`/`display_ui.py`/
+  `hand_renderer.py`/`ssd1306.py`)는 전혀 수정하지 않았고,
+  `oled_device.open_display()`가 이미 I2C 미연결/스캔 실패 등 모든
+  실패를 `None` 반환으로 처리해 예외를 던지지 않는 것도 재확인했다
+  (OLED 미연결 상태에서의 개발/테스트 요구사항과 호환).
+  `run_wifi.py`/`tools/autorun/main.py`는 여전히
+  `transport_kind="udp"`만 넘기고 전혀 수정하지 않았다 — 신규 경로
+  전환은 `config.py`의 플래그 하나로만 이뤄진다.
+- **검증 결과**: `python3 -m py_compile`(수정/신규 파일 전체) 통과,
+  `python3 -m unittest discover -s tests`로 기존 92개 전부 포함해 총
+  122개 테스트 통과(회귀 없음). 신규 테스트는 실제 loopback TCP/UDP
+  소켓으로 `probe_board`/`register_with_board`/`scan_for_board`/
+  `discover_and_register_board`/`_tcp_discovery_loop`(Mac 쪽, 가짜 HTTP
+  서버 대상)와 `ClientSession`의 GET/POST+Content-Length 파싱(보드 쪽,
+  web_server.py)을 각각 검증했다. **미검증(실기기)**: 실제 K230D-Zero
+  보드에서 `/device-info`/`/register` 라우트가 실제로 응답하는지, Mac이
+  실제 LAN/핫스팟에서 보드를 찾아내는지, 등록 후 실제 UDP
+  MOVE/CLICK/DRAG/STOP 마우스 제어가 동작하는지, AI 추론 루프 FPS에
+  영향이 없는지는 전혀 확인되지 않았다 — 로컬 테스트 통과가 실기기
+  동작을 보장하지 않는다.
+- **실기기 검증(2026-10-27, 아이폰 핫스팟 "i", /28)**: 보드 4개 파일
+  (`config.py`/`transport.py`/`web_server.py`/`smart_glass_server.py`)을
+  CRC32로 바이트 단위 일치 확인 후 배포, 기존 파일은 보드 쪽
+  `/sdcard/smart_glass_backup_20261027/`에 보드 자체 파일 복사(읽기→쓰기
+  재입력 없음, 이전 세션의 "대용량 텍스트 수동 전사 불신뢰" 교훈 적용)로
+  백업했다. 실제 결과(확인됨): Mac(172.20.10.2)이 보드(172.20.10.3)를
+  TCP 8060으로 탐색 → `EDGEGLASS_BOARD` 식별 → `POST /register` → 보드
+  로그에 `[UDP] Mac registered via HTTP: 172.20.10.2:9000`/`[UDP] Mouse
+  control ready` 출현 → Mac 터미널에 `[BOARD] EdgeGlass-AI 탐색 및 등록
+  완료` + `[WEB] Main/Stream/Snapshot` 블록 정확히 출력. `curl`로
+  `/`, `/snapshot`, `/stream`, `/device-info`, `/health` 전부 실제 응답
+  확인(JPEG 640x480, HTML, JSON). 이 요청들이 들어오는 동안 AI 추론
+  루프는 크래시 없이 계속 동작(`[ORCH] /stream ended ... err=OSError(104,)`
+  같은 클라이언트 측 연결 종료 로그만 남고 오케스트레이터 자체는
+  영향받지 않음). OLED 미연결 상태에서 `open_display()`가 예외 없이
+  정상적으로 비활성화되는 것도 실기기로 재확인.
+  **원인 조사(해프닝)**: 이후 "`[Wi-Fi] 네트워크 연결 완료`가 출력되지
+  않는다"는 보고를 받았으나, 재현 테스트에서는 해당 줄이 정상 출력됨 —
+  원인은 코드 결함이 아니라 이전 테스트에서 종료하지 않고 남겨둔 Mac
+  브리지 프로세스가 UDP 9000 포트를 계속 점유하고 있었던 것으로
+  확인됨(`lsof`/`ps`로 확인 후 종료, 깨끗한 환경에서 재현 테스트로
+  정상 출력 재확인) — 로그 포맷 코드 자체는 수정하지 않았다.
+  **여전히 미검증**: 실제 `@MOUSE` UDP 패킷 수신(`[UDP] 마우스 패킷
+  수신 시작`)과 손 제스처 MOVE/CLICK/DRAG/STOP 동작은 카메라 앞 실제
+  손 동작이 필요해 에이전트가 직접 트리거할 수 없고, 아직 사용자
+  확인을 받지 못했다.
+
 ## 5. 실패했던 접근 방식과 교훈
 
 - `wlan.connect()` 반복 호출은 연결을 빠르게 만들지 않고 handshake를 깨뜨렸다.

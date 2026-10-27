@@ -44,6 +44,7 @@ import sys
 import gc
 import time
 import image
+import json
 
 PROJECT_DIR = "/sdcard/smart_glass"
 if PROJECT_DIR not in sys.path:
@@ -90,6 +91,14 @@ FEATURE_DISPLAY_OLED = True        # VLT-OL016 I2C OLED에 손 관절 스켈레�
 FEATURE_WEB_SERVER = True         # HTTP 서버 자체
 FEATURE_WEB_VIDEO = True          # /snapshot, /stream (WEB_SERVER 필요)
 FEATURE_WEB_JOINTS = True         # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
+
+# Mac이 TCP 8060으로 GET /device-info 를 보내 이 식별 문자열을 확인하고
+# (다른 장치의 응답은 무시), POST /register 로 자신의 UDP 포트를 알려주면
+# 그 요청의 송신자 IP를 등록한다(RegisteredUdpTransport.register()) --
+# config.MOUSE_UDP_USE_HTTP_REGISTRATION 참고. 암호화/인증이 아니라 다른
+# 장치와 혼동하지 않기 위한 식별용 문자열이다.
+BOARD_IDENTITY = "EDGEGLASS_BOARD"
+USER_IDENTITY = "EDGEGLASS_USER"
 
 WEB_PORT = 8060
 WEB_FRAME_WIDTH = 640
@@ -296,7 +305,7 @@ class WebState:
         self.server = web_server.HttpServer(port).start()
         log("web server listening on port %d" % port)
 
-    def step(self, rig, hand_result):
+    def step(self, rig, hand_result, mouse_controller=None):
         """메인 루프에서 매 프레임 한 번씩 호출. 블로킹하지 않는다."""
         if self.server is None:
             return
@@ -324,7 +333,7 @@ class WebState:
                 path = session.pump_read()
                 if path is None:
                     return
-                self._route(rig, hand_result, session, path)
+                self._route(rig, hand_result, session, path, mouse_controller)
 
             if session.state == web_server.ClientSession.STATE_SENDING:
                 done = session.pump_send()
@@ -386,7 +395,7 @@ class WebState:
                 log("JPEG compression failed once; retrying with a new frame")
                 gc.collect()
 
-    def _route(self, rig, hand_result, session, path):
+    def _route(self, rig, hand_result, session, path, mouse_controller=None):
         if path == "/health":
             body = (
                 '{"status":"ok","hand_recognition":%s,"web_joints":%s}'
@@ -394,6 +403,14 @@ class WebState:
                    str(FEATURE_WEB_JOINTS).lower())
             ).encode()
             session.queue(web_server.http_response("200 OK", "application/json", body))
+        elif path == "/device-info" and session.method == "GET":
+            body = (
+                '{"identity":"%s","device":"K230D-Zero","service":"EdgeGlass-AI"}'
+                % BOARD_IDENTITY
+            ).encode()
+            session.queue(web_server.http_response("200 OK", "application/json", body))
+        elif path == "/register" and session.method == "POST":
+            self._handle_register(session, mouse_controller)
         elif path == "/snapshot" and FEATURE_WEB_VIDEO:
             jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
             debug_log("/snapshot bytes=%d encode_ms=%d request_to_ready_ms=%d" % (
@@ -415,6 +432,46 @@ class WebState:
                 b"</body></html>" % (WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT)
             )
             session.queue(web_server.http_response("200 OK", "text/html; charset=utf-8", body))
+
+    def _handle_register(self, session, mouse_controller):
+        """POST /register -- Mac이 보낸 identity+udp_port를 확인하고, 유효하면
+        요청의 실제 송신자 IP(session.addr[0])를 UDP 목적지로 등록한다.
+        identity는 인증이 아니라 다른 장치와 혼동하지 않기 위한 식별용이다.
+
+        이 핸들러 안에서 생기는 어떤 예외도(잘못된 JSON, 예상 밖의 타입 등)
+        절대 밖으로 새어나가서는 안 된다 -- WebState.step()의
+        except (OSError, ValueError)는 이걸 못 잡고, 그러면 main()까지
+        올라가 카메라/AI/OLED 전체가 함께 죽는다. mouse_controller.transport
+        .step()에 이미 쓰인 것과 같은 방어 패턴(실패해도 이 기능만 끈다).
+        """
+        valid = False
+        try:
+            payload = json.loads(session.body.decode()) if session.body else {}
+            identity = payload.get("identity") if isinstance(payload, dict) else None
+            udp_port = payload.get("udp_port") if isinstance(payload, dict) else None
+            valid = (
+                identity == USER_IDENTITY
+                and isinstance(udp_port, int) and not isinstance(udp_port, bool)
+                and 0 < udp_port < 65536
+            )
+            if valid:
+                mac_ip = session.addr[0]
+                if mouse_controller is not None and hasattr(mouse_controller.transport, "register"):
+                    mouse_controller.transport.register(mac_ip, udp_port)
+                else:
+                    log("/register from %s:%d accepted but no registrable UDP "
+                        "transport is active" % (mac_ip, udp_port))
+        except Exception as error:
+            log("/register handler error (ignored): %r" % (error,))
+            valid = False
+
+        if not valid:
+            log("/register rejected from %r" % (session.addr,))
+            body = ('{"identity":"%s","status":"EDGEGLASS_REJECTED"}' % BOARD_IDENTITY).encode()
+            session.queue(web_server.http_response("400 Bad Request", "application/json", body))
+            return
+        body = ('{"identity":"%s","status":"EDGEGLASS_REGISTERED"}' % BOARD_IDENTITY).encode()
+        session.queue(web_server.http_response("200 OK", "application/json", body))
 
 
 def main(transport_kind=None, enable_web=None):
@@ -520,6 +577,7 @@ def main(transport_kind=None, enable_web=None):
                         udp_discovery_ip=ifconfig[0] if ifconfig else None,
                         udp_discovery_netmask=ifconfig[1] if ifconfig else None,
                         udp_max_scan_hosts=config.MOUSE_UDP_MAX_SCAN_HOSTS,
+                        udp_use_http_registration=config.MOUSE_UDP_USE_HTTP_REGISTRATION,
                     ),
                 )
             except (OSError, ValueError) as error:
@@ -534,6 +592,16 @@ def main(transport_kind=None, enable_web=None):
                         _log("[UDP] Mouse control ready")
                     udp_registry.on_registered = _on_mac_registered
                     banner_lines.append("[UDP] Waiting for Mac registration...")
+                elif hasattr(mouse_controller.transport, "register"):
+                    # RegisteredUdpTransport -- no scanning here; the Mac
+                    # bridge finds this board over TCP (GET /device-info)
+                    # and confirms it with POST /register.
+                    def _on_mac_registered_http(peer, _log=banner_print):
+                        _log("[UDP] Mac registered via HTTP: %s:%d" % (peer[0], peer[1]))
+                        _log("[UDP] Mouse control ready")
+                    mouse_controller.transport.on_registered = _on_mac_registered_http
+                    banner_lines.append(
+                        "[UDP] Waiting for Mac to register via HTTP (POST /register)...")
                 elif mouse_transport_kind == "udp":
                     banner_lines.append(
                         "[UDP] Fixed target: %s:%s" % (config.MOUSE_UDP_HOST, config.MOUSE_UDP_PORT)
@@ -635,7 +703,7 @@ def main(transport_kind=None, enable_web=None):
                     rig.refresh_osd()
 
             if web_state is not None:
-                web_state.step(rig, hand_result)
+                web_state.step(rig, hand_result, mouse_controller)
 
             if frame_count % 30 == 0:
                 gc.collect()

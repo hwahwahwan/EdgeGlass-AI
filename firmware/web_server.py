@@ -160,9 +160,14 @@ class ClientSession:
         self._request_deadline = time.ticks_add(time.ticks_ms(), request_timeout_ms)
         self._send_view = None
         self._send_offset = 0
+        self._headers_parsed = False
+        self._body_start = 0
 
         self.state = self.STATE_READING
+        self.method = None
         self.path = None
+        self.content_length = 0
+        self.body = b""
         self.created_ms = time.ticks_ms()
         self.last_progress_ms = self.created_ms
 
@@ -170,8 +175,12 @@ class ClientSession:
         return time.ticks_diff(time.ticks_ms(), self.last_progress_ms) > self.idle_timeout_ms
 
     def pump_read(self):
-        """한 번만 non-blocking recv 시도. 요청 헤더가 다 왔으면 path를 반환.
+        """한 번만 non-blocking recv 시도. 요청(헤더+본문)이 다 왔으면 path를 반환.
 
+        GET처럼 본문이 없는 요청은 헤더 구분자(\\r\\n\\r\\n)만 찾으면 바로
+        끝나던 예전 동작 그대로다. POST처럼 Content-Length가 있는 요청은
+        헤더를 다 받은 뒤에도 본문 바이트가 그만큼 모일 때까지 계속
+        READING 상태로 남아 다음 recv를 기다린다(self.body로 접근).
         아직이면 None. 타임아웃/본문 과대/연결 종료는 OSError/ValueError로 알림.
         """
         if self.state != self.STATE_READING:
@@ -185,22 +194,47 @@ class ClientSession:
         if chunk:
             self.last_progress_ms = time.ticks_ms()
             self._request_buf.extend(chunk)
-            idx = self._request_buf.find(b"\r\n\r\n")
-            if idx < 0:
-                idx = self._request_buf.find(b"\n\n")
-            if idx >= 0:
-                line = bytes(self._request_buf[:idx]).split(b"\r\n", 1)[0].split()
-                self.path = line[1].decode().split("?", 1)[0] if len(line) >= 2 else "/"
-                self.state = self.STATE_READY
-                return self.path
         elif chunk == b"":
             raise OSError("peer closed during request read")
 
-        if len(self._request_buf) >= self.max_request_bytes:
-            raise ValueError("request header too large")
-        if time.ticks_diff(self._request_deadline, time.ticks_ms()) <= 0:
-            raise OSError("request read timeout")
-        return None
+        if not self._headers_parsed:
+            idx = self._request_buf.find(b"\r\n\r\n")
+            sep_len = 4
+            if idx < 0:
+                idx = self._request_buf.find(b"\n\n")
+                sep_len = 2
+            if idx < 0:
+                if len(self._request_buf) >= self.max_request_bytes:
+                    raise ValueError("request header too large")
+                if time.ticks_diff(self._request_deadline, time.ticks_ms()) <= 0:
+                    raise OSError("request read timeout")
+                return None
+            header_lines = bytes(self._request_buf[:idx]).split(b"\r\n")
+            request_line = header_lines[0].split()
+            self.method = request_line[0].decode() if len(request_line) >= 1 else "GET"
+            self.path = request_line[1].decode().split("?", 1)[0] if len(request_line) >= 2 else "/"
+            for header_line in header_lines[1:]:
+                name, sep, value = header_line.partition(b":")
+                if sep and name.strip().lower() == b"content-length":
+                    try:
+                        self.content_length = int(value.strip())
+                    except ValueError:
+                        self.content_length = 0
+                    break
+            self._headers_parsed = True
+            self._body_start = idx + sep_len
+
+        body_so_far = len(self._request_buf) - self._body_start
+        if body_so_far < self.content_length:
+            if len(self._request_buf) >= self.max_request_bytes:
+                raise ValueError("request body too large")
+            if time.ticks_diff(self._request_deadline, time.ticks_ms()) <= 0:
+                raise OSError("request read timeout")
+            return None
+
+        self.body = bytes(self._request_buf[self._body_start:self._body_start + self.content_length])
+        self.state = self.STATE_READY
+        return self.path
 
     def queue(self, data):
         """새 응답/프레임 바이트를 전송 대기열에 올린다."""
