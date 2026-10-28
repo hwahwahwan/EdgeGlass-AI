@@ -89,7 +89,7 @@ FEATURE_DISPLAY_OLED = True        # VLT-OL016 I2C OLED에 손 관절 스켈레�
 # 진행한다(이전 시도는 핫스팟이 꺼진 상태였고, 그것이 원인이었는지가
 # 이번 재시도의 핵심 확인 사항이다). tools/DEPLOY.md §11 참고.
 FEATURE_WEB_SERVER = True         # HTTP 서버 자체
-FEATURE_WEB_VIDEO = True          # /snapshot, /stream (WEB_SERVER 필요)
+FEATURE_WEB_VIDEO = True          # /stream (WEB_SERVER 필요)
 FEATURE_WEB_JOINTS = True         # 웹 영상에 관절 오버레이 (WEB_VIDEO+HAND_RECOGNITION 필요)
 
 # Mac이 TCP 8060으로 GET /device-info 를 보내 이 식별 문자열을 확인하고
@@ -411,12 +411,6 @@ class WebState:
             session.queue(web_server.http_response("200 OK", "application/json", body))
         elif path == "/register" and session.method == "POST":
             self._handle_register(session, mouse_controller)
-        elif path == "/snapshot" and FEATURE_WEB_VIDEO:
-            jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
-            debug_log("/snapshot bytes=%d encode_ms=%d request_to_ready_ms=%d" % (
-                len(jpeg), encode_ms,
-                time.ticks_diff(time.ticks_ms(), session.created_ms)))
-            session.queue(web_server.http_response("200 OK", "image/jpeg", jpeg))
         elif path == "/stream" and FEATURE_WEB_VIDEO:
             log("/stream start")
             self.streaming = True

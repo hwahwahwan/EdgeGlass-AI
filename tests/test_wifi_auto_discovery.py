@@ -543,14 +543,14 @@ class RunUdpLoopDiscoveryIntegrationTests(unittest.TestCase):
 
 
 class AnnounceWebUrlsTests(unittest.TestCase):
-    def test_prints_main_stream_snapshot_urls(self):
+    def test_prints_main_and_stream_urls(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             mac_mouse_bridge._announce_web_urls("172.20.10.2", 8060)
         output = buf.getvalue()
-        self.assertIn("[WEB] Main:     http://172.20.10.2:8060/", output)
-        self.assertIn("[WEB] Stream:   http://172.20.10.2:8060/stream", output)
-        self.assertIn("[WEB] Snapshot: http://172.20.10.2:8060/snapshot", output)
+        self.assertIn("[WEB] Main:   http://172.20.10.2:8060/", output)
+        self.assertIn("[WEB] Stream: http://172.20.10.2:8060/stream", output)
+        self.assertNotIn("Snapshot", output)
 
 
 if __name__ == "__main__":

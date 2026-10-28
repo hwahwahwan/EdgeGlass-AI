@@ -325,9 +325,8 @@ def _reply_to_hello(sock, addr, on_registered):
 
 def _announce_web_urls(board_ip, web_port):
     """Print the board's web server URLs once its address is known."""
-    print("[WEB] Main:     http://%s:%d/" % (board_ip, web_port))
-    print("[WEB] Stream:   http://%s:%d/stream" % (board_ip, web_port))
-    print("[WEB] Snapshot: http://%s:%d/snapshot" % (board_ip, web_port))
+    print("[WEB] Main:   http://%s:%d/" % (board_ip, web_port))
+    print("[WEB] Stream: http://%s:%d/stream" % (board_ip, web_port))
 
 
 def _hexmask_to_dotted(hexmask):
