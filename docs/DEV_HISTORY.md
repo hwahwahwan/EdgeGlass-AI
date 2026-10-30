@@ -1049,6 +1049,44 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
   import가 안 됨 — `WebState`/`main()` 안에 새로 넣은 백오프·부팅
   단계·Wi-Fi 폴링 연동 로직 자체는 문법 검사(`py_compile`)만 했고,
   실제 동작은 실기기에서만 확인 가능.
+- **UART 전용 프로필의 Wi-Fi 무관성 재확인(2026-10-30, 코드 레벨,
+  확인됨)**: 사용자가 실기기를 UART2 모드(핫스팟 없이)로 테스트하려
+  해서 `firmware/run_uart.py`(`transport_kind="uart",
+  enable_web=False`) 경로를 다시 코드로 추적함.
+  `transport.wifi_is_needed(False, True, "uart")`는 `False`를 반환해,
+  이 프로필은 "Wi-Fi 연결이 실패해도 넘어간다"가 아니라 **Wi-Fi
+  연결 자체를 애초에 전혀 시도하지 않음**을 재확인함.
+  `transport.create_transport("uart", ...)`도 UDP 관련 인자를 전부
+  무시하고 `UartTransport`만 반환해 네트워크와 완전히 무관함.
+- **새로 발견한 작은 결함(미수정, 사용자 승인 대기) — OLED I2C 중복
+  오픈 가능성**: `tools/autorun/main.py`의 `run_boot()`가 SAFE_MODE
+  분기(`SAFE MODE`/`REPL ONLY` 표시 후 return)로 빠질 때 그 직전에
+  연 OLED(`oled_device.open_display()`)를 닫지 않고 종료함 — 이후
+  REPL에서 `run_uart.py`를 실행하면 `smart_glass_server.main()`이
+  같은 I2C 버스를 두 번째로 다시 열게 됨. 실제 문제가 되는지는
+  실기기 없이 확인 불가(미확인). 한 줄
+  (`oled_device.close_display(oled)`) 추가를 제안했고 사용자 승인
+  대기 중, 아직 코드 미수정.
+- **실기기 검증 완료(2026-10-30)**: `tools/autorun/main.py`/
+  `firmware/smart_glass_server.py`/`display_ui.py`/`display_config.py`/
+  신규 `failure_backoff.py`/`boot_stage.py`를 실기기에 배포(백업 후
+  CRC32 검증 완료)하고 UART 전용 프로필(`run_uart.py`, 핫스팟 없이)로
+  테스트함. OLED가 SAFE_MODE 체크보다 먼저 초기화됨을 로그로 확인
+  (`[OLED] i2c.scan() -> ['0x3c']` → `ready`가 SAFE_MODE 분기 진입
+  전에 찍힘). 바로 위에서 "미확인"으로 남겼던 **OLED I2C 중복 오픈
+  우려는 실기기에서 문제없음으로 확인됨**: SAFE_MODE 경로에서 OLED를
+  열고 `close_display()`로 닫은 뒤, 곧바로 `run_uart.py` 실행 시
+  `smart_glass_server.main()`이 같은 I2C 버스를 다시 열었고 두 번째
+  오픈도 정상 성공. Wi-Fi 관련 로그가 전혀 찍히지 않아 UART 프로필의
+  Wi-Fi 무관성이 실기기에서도 재확인됨. UART2 `@MOUSE` 마우스 제어
+  정상 동작 확인(`CLICK_DECISION`→`CLICK_TX packet=@MOUSE|CLICK`,
+  MOVE/STOP/DRAG 전환 정상, 35초 이상 크래시 없음). **미확인으로
+  남는 부분**: OLED 화면에 실제로 부팅 단계 문구(`EDGEGLASS-AI/
+  BOOTING`, `SAFE MODE/REPL ONLY`, `CAMERA`→`AI MODELS`→`WIFI/OFF`→
+  `MOUSE`→`WEB SERVER/OFF`→`SYSTEM READY`→스켈레톤)가 보였는지는
+  에이전트가 직접 볼 수 없어 사용자 확인 대기 중. Wi-Fi 연결/웹
+  스트리밍/`MemoryError` 백오프/치명적 크래시 OLED 유지/USB 로그
+  수집기는 이번 테스트 범위에서 제외함(사용자 요청).
 
 ## 5. 실패했던 접근 방식과 교훈
 
@@ -1588,6 +1626,198 @@ GMT130 ST7789 LCD를 VLT-OL016 OLED(0.96인치, 128×64, I2C, SSD1306 추정)로
       메커니즘은 코드 조사만으로 확정 못함. 현재는 재발 시 수동
       재시작(`/sdcard/main.py` 재실행)으로만 대응 중, 코드 수정은
       하지 않음.
+
+11. **채널 2(AI) `sensor.snapshot()` RuntimeError로 전체 스크립트
+    크래시 (실기기 재현 확인, 미해결)**: UART 전용 프로필(핫스팟/
+    웹서버 없음)로 실기기 테스트 중, 약 35초간 MOVE/STOP/DRAG/CLICK
+    정상 동작 후, 카메라를 뒤집어 방치했다가 다시 움직여 장면에
+    물체가 많이 보이는 상황에서 전체 스크립트가 크래시함(사용자
+    재현, 2026-10-30). **원인: 확인됨**(실기기 Traceback 직접 확인,
+    읽기 전용 조회, 재부팅/로그 삭제 없음) — `firmware/
+    smart_glass_server.py:310`(`CameraRig.get_ai_frame()`)의
+    `self.sensor.snapshot(chn=CAM_CHN_ID_2)`에서 `RuntimeError:
+    sensor(0) snapshot chn(2) failed(3)` 발생. AI 추론(hand_det/
+    handkp_det)이나 손 검출/랜드마크 처리, 일반 Python `gc` 메모리
+    관리 어느 단계도 아니고, **프레임을 받아오는 센서 VI 드라이버
+    단계**에서 발생. 이 호출에는 try/except가 전혀 없어 예외가
+    `main()`의 최상위 `except BaseException`까지 전파돼 AI/마우스/
+    OLED를 포함한 전체 스크립트가 종료됨 — 설계 검토 때 "AI 추론
+    경로에 격리 코드가 없다"고 지적했던 부분이 실제로 크래시를
+    일으킨 첫 실기기 사례. 기존 `MemoryError: Out of fast frame
+    buffer stack index`(항목 10)와는 **직접 동일 원인이 아님
+    (확인됨)** — 이 실행은 `enable_web=False`라 웹서버/JPEG
+    인코딩 코드 경로(채널 1)가 전혀 실행되지 않았음. 다른 예외
+    타입(RuntimeError)·다른 채널(2)·다른 API(`sensor.snapshot` vs
+    `img.compress`)이며, "K230 미디어 파이프라인 자원 관리"라는 더
+    큰 범주만 공유할 수 있다는 수준의 가설(미확인). 외부 자료
+    ([Kendryte 커뮤니티 질문](https://www.kendryte.com/answer/questions/10010000000001527)):
+    정확히 동일한 오류 메시지가 커뮤니티에 보고된 사례가 있고 채널
+    2 설정/프레임레이트/버퍼 자원 제약과 관련된다는 추정이 있으나
+    공식적으로 확정된 원인·해결책은 없음. **가설(미확인)**: 카메라
+    급격한 이동으로 인한 AE(자동노출) 재수렴, 또는 장면 복잡도
+    증가로 `hand_det` 후처리(앵커 디코드+NMS)가 느려져 채널 2
+    프레임 소비 주기가 늘어나 VI 버퍼 자원 상태가 악화됐을 가능성 —
+    실측 계측 없이는 확정 불가. **시도한 해결 방법**: 아직 없음
+    (원인 확인 전 코드 수정 금지 지시에 따라 미적용). **제안한
+    해결 방안(미적용, 사용자 승인 대기)**: `get_ai_frame()` 호출부를
+    `except (RuntimeError, OSError)`로 감싸 해당 프레임만 건너뛰고
+    (예: `no_hand()`와 동일 처리) 다음 루프로 계속 진행, 연속 N회
+    이상 실패 시에만 치명적으로 처리, 실패 시 `gc.mem_free()` 로그
+    추가. **최종 해결**: (미해결). **검증 결과**: (해당 없음) —
+    `config.VERBOSE_ORCHESTRATOR_LOGS=False`가 기본값이라 크래시
+    직전 메모리/프레임 타이밍 계측 자체가 없었음, 재현 시 데이터
+    확보를 위해 계측 추가가 제안됨.
+    - **격리 코드 구현 및 실기기 배포 완료, 재현 검증은 보류
+      (2026-10-30)**: 제안했던 해결 방안(`get_ai_frame()` 호출을
+      `except (RuntimeError, OSError)`로 감싸 해당 프레임만 건너뛰고
+      STOP 전송, 연속 실패 카운터로 일정 횟수(10회,
+      `AI_FRAME_FAILURE_LIMIT`) 이상이면 무한 재시도 대신 안전하게
+      루프를 빠져나와 정상 종료, 실패마다 `gc.mem_free()`/소요시간/
+      연속횟수 로그)를 `firmware/smart_glass_server.py`에 구현함.
+      로컬 테스트(193개 기존 테스트, 이 파일 자체는 `media.sensor`
+      등 하드웨어 전용 import 때문에 CPython에서 import 불가라 문법
+      검사만 가능) 통과 후, 보드 파일 백업(`/sdcard/
+      smart_glass_backup_20261030_aiframe/`) → 배포 → CRC32 검증 →
+      실기기 import 성공 확인까지 완료함. UART 프로필로 재부팅해
+      정상 부팅(카메라/OLED/AI 초기화 전부 기존과 동일하게 성공)까지
+      확인했으나, **사용자 지시대로 센서 오류를 일부러 재현하지
+      않았으므로 새로 추가한 except 분기 자체(실패 카운트/STOP
+      강제/안전 중단)는 아직 실기기에서 직접 재현·검증되지 않음
+      (미검증)** — 다음에 우연히 같은 오류가 재발하면 그때 로그로
+      확인 가능.
+    - **재실행 시도 중 MCP 연결 응답 없음, 원인 미확정(같은 날)**:
+      `run_uart.py`를 재시작하려고 `canmv_stop_script`/
+      `canmv_script_running`/`canmv_list_dir`를 호출했으나 전부
+      "Not connected" 오류를 반환함. `canmv_connect_board`를 포트
+      명시해서 재시도해도 동일. 다만 `canmv_detect_boards`로는 USB
+      포트가 OS 레벨에서는 여전히 보이고 `canmv_board_info`는
+      `connected: true`(단 `ready: false`)를 반환함. **가설
+      (미확인)**: ① 이전 턴들처럼 `run_uart.py`가 여전히 정상적으로
+      메인 루프를 돌고 있어 REPL이 바쁜 상태일 가능성, ② 센서 채널
+      2 드라이버가 이번엔 예외를 던지지 못하고 실제로 멈춘(hang)
+      상태일 가능성(과거 MediaManager 중복 초기화로 물리 전원
+      재인가가 필요했던 사례와 유사 패턴). 사용자 지시에 따라 추가
+      공격적 재연결·재부팅·코드 수정은 하지 않고 사용자에게 물리적
+      확인(OLED 화면, 손동작 반응)을 요청한 상태로 조사 보류.
+      **재정정(같은 날, 전체 로그 재조사 결과)**: 앞의 "에이전트의
+      반복된 `connect_board` 호출이 원인"이라는 정정도 **틀렸음** —
+      그 턴에서 에이전트가 가장 먼저 호출한 명령(`canmv_
+      script_running()`)이 **어떤 connect_board 호출보다도 먼저**
+      이미 "Not connected"를 반환했다(확인됨, 호출 순서 재확인).
+      즉 에이전트의 재연결 시도들은 전부 이미 끊긴 뒤에 일어난
+      것이라 원인이 될 수 없다. **최종 결론**: 스크립트가 최초로
+      응답 불능이 된 **진짜 원인은 끝내 확인되지 않았다**(미확인) —
+      Traceback도, 종료 메시지도 로그에 전혀 없다. 확실한 것은 (a)
+      에이전트의 재연결 시도가 원인이 아니라는 것, (b) 사용자의
+      물리적 USB 재연결은 발견 "이후"의 대응 행동이었다는 것(사용자
+      확인), (c) 그 물리적 재연결이 관찰된 유일한 "MPY: soft
+      reboot" 로그를 만들어내며 연결을 회복시켰다는 것뿐이다 — 이
+      한 줄이 최초 원인의 기록인지 회복 행동의 결과인지는 터미널
+      버퍼가 "새 연결이 맺어질 때만 갱신"되는 기존 제약 때문에
+      구분 불가능하다. 이후 `run_uart.py`를 재실행해 카메라/OLED/AI
+      전부 정상 재초기화되고 손 제스처도 정상 인식됨을 확인함 —
+      이 사건은 섹션 6 항목 11(센서 chn(2) RuntimeError)과 시간상
+      무관하지 않지만(아래 참고), 같은 원인이라는 증거는 없음.
+    - **동일 시나리오 재시도, 같은 실행에서 약 12.3분 뒤 결국 재현됨
+      (같은 날, 정정)**: 앞서 "ms=442840까지 재현 안 됨"으로 기록한
+      것은 **그 시점까지의 중간 확인일 뿐이었다** — 같은 실행이
+      이어져 ms≈739660 시점(부팅 후 약 12.3분)에 `AI frame fetch
+      failed` 격리 로그가 실제로 발동했다(사용자가 전체 터미널
+      로그를 직접 공유, 2026-10-30). **확인된 사실**: `get_ai_frame()`
+      → `sensor.snapshot(chn=CAM_CHN_ID_2)`가 `RuntimeError('sensor(0)
+      snapshot chn(2) failed(3)',)`로 10회 연속 실패, 매번
+      `fetch_ms≈1005~1007`(CanMV Sensor API 문서의 `snapshot()` 기본
+      타임아웃 1000ms와 일치 — 즉시 실패가 아니라 타임아웃까지
+      기다린 뒤 실패, 채널 2 영상 입력 파이프라인이 완전히 멈춘
+      것으로 추정). `gc.mem_free()`가 실패마다 정확히 2400바이트씩
+      감소(3832288→...→3810688) — 저희 Python except 블록은 이
+      크기를 설명할 할당을 하지 않아, **`sensor.snapshot()` 네이티브
+      실패 경로 자체의 고정 크기 누수**로 추정(가설, 벤더 소스 없이
+      확정 불가; 예외가 `RuntimeError`이지 `MemoryError`가 아니라는
+      점은 일반 Python 힙 "고갈"이 원인은 아니라는 반증). 10회 도달
+      후 설계대로 `break`로 안전하게 종료(`"[CanMV] Script
+      completed"`, 크래시 아님) — 단 `finally` 블록이 마우스
+      (`mouse_controller.close()`)와 OLED(`oled_device.close_display()`)
+      와 카메라(`rig.destroy()`)를 **전부 함께** 종료시킴(코드 추적
+      확인됨, `firmware/smart_glass_server.py` `main()`의
+      `finally`). **핵심 결론**: 이 격리 구조는 웹서버/마우스
+      초기화 실패 격리(그 기능만 끄고 메인 루프는 계속 도는 방식)
+      와 **정책이 다르다** — 카메라 반복 실패는 자체 오류가 없는
+      마우스/OLED까지 같이 종료시켜, "기능별 장애 격리" 철학과
+      불일치함(확인됨, 설계 검토 결과). **대안(검토만, 미구현)**:
+      한도 도달 시 전체 `break` 대신 "이번 실행 동안 AI/카메라
+      처리만 영구 비활성화" 플래그로 바꿔 `FEATURE_HAND_RECOGNITION`
+      블록만 매 프레임 스킵하고 마우스/웹/OLED는 계속 살려두는 방식을
+      제안함. 센서/미디어 서브시스템의 능동 재초기화(재연결 재시도)는
+      과거 `MediaManager.init()` 중복 호출로 보드가 물리 전원
+      재인가가 필요할 정도로 멈췄던 사례가 있어 **권장하지 않음**
+      (hang 위험).
+    - **두 사건의 연관성(같은 날)**: 시간순으로 "연결 응답 불능"
+      사건이 먼저, "센서 chn(2) 10회 실패" 사건이 그 **다음 실행**
+      에서 나중에 발생해 전자가 후자의 원인일 수 없음(확인됨, 순서
+      반대). "연결 응답 불능"의 원인 자체가 미확인이라 두 사건이
+      같은 메커니즘이라고 주장할 근거가 없음 — 둘 다 "K230 카메라/
+      미디어 서브시스템 불안정성"이라는 같은 큰 범주일 수는 있으나
+      (이 프로젝트에 이미 여러 번 기록된 패턴), 구체적으로 같은
+      원인이라는 증거는 없어 **억지로 연결하지 않음**(사용자 지시
+      반영). `rig.destroy()`의 정리 작업이 다음 연결 상태에 영향을
+      줬다는 증거도 없음(종료 후 `script_running: false`로 정상
+      REPL 상태 확인됨) — 별개의 사건으로 결론.
+    - **병렬 서브에이전트 A(원인 조사)+B(구현·배포) 결과 통합(같은
+      날)**: **[A 결과, 확인됨]** `snapshot()` 실패가 즉시가 아니라
+      매번 ~1005-1007ms(공식 문서 기본 timeout=1000ms와 일치) 뒤
+      발생 — 채널 2 VI 파이프라인이 그 순간부터 완전히 멈추는
+      패턴 재확인. except 블록이 만드는 Python 객체(지역변수
+      `error`, 포맷 문자열)는 레퍼런스카운트상 블록 종료 즉시
+      해제돼 2400바이트 규모를 설명 못함(우리 코드가 누수 원인이
+      아님, 코드 레벨 반증). 이 크래시는 UART 전용 모드로 채널
+      1(웹)이 애초에 설정되지 않아 이전 JPEG `MemoryError`(채널1)와
+      자원을 공유할 수조차 없는 상태였음(구조적으로 무관). **[A
+      결과, 가설/미확인]**: `sensor.snapshot()` 네이티브 실패
+      경로 자체의 벤더 레벨 누수일 가능성이 가장 유력(RuntimeError
+      이지 MemoryError가 아니라는 점이 "일반 힙 고갈"보다 이쪽을
+      지지), VB 풀이 `gc.mem_free()`와 분리된 영역이라면 이 수치가
+      안 움직여야 하는데 움직였으므로 적어도 이번 누수는 일반
+      MicroPython 힙 쪽일 가능성(가설). 외부 자료
+      ([kendryte 질문 1](https://www.kendryte.com/answer/questions/10010000000001527),
+      [질문 2](https://www.kendryte.com/answer/questions/10010000000000504),
+      [질문 3](https://www.kendryte.com/answer/questions/10010000000002725))에서
+      동일/유사 오류 보고 확인했으나 공식 해결책 없음, "vb init
+      failed" 계열은 재부팅으로만 해결된 선례 확인. 12분 뒤 발생하는
+      정확한 트리거, v1.8 VICAP 리팩터링과의 관련 여부는 미확인으로
+      남음. 권장: 능동 재초기화 시도는 하지 말 것(과거 hang 전례 +
+      외부 사례 모두 "재부팅만이 해결책" 패턴과 일치), 다음 발생 시
+      가장 결정적인 추가 계측은 "실패 시 `gc.collect()` 전/후
+      `mem_free` 비교".
+      **[B 결과, 구현+배포]**: `firmware/smart_glass_server.py` 1개
+      파일만 수정 — 10회 연속 실패 시 `break`(전체 종료)를
+      `camera_disabled=True` 플래그로 교체해 `while` 루프는 계속
+      돌고 이후 `rig.get_ai_frame()`을 다시는 호출하지 않음. 전환
+      시점에 마우스 `update("STOP")` 명시 호출(`mouse_controller.
+      close()`는 호출 안 해 UART는 계속 열림), OLED
+      `show_alert(("CAMERA ERROR","AI DISABLED"))`를 전환 시점에
+      **1회만** 그려 정적으로 유지(매 루프 재호출 시 I2C 스팸이
+      되는 것을 구현 중 자체 발견·수정). `camera_disabled` 상태에서
+      300프레임마다 heartbeat 로그 추가. 로컬 193개 테스트 통과
+      (코디네이터 재확인), 보드 백업(`/sdcard/
+      smart_glass_backup_20261030_camiso/`) → 배포 → CRC32 일치
+      (58836 bytes / `0xf60ef052`, 코디네이터가 로컬 재계산으로
+      재확인) → import sanity check 통과 → UART 모드 정상 기동
+      확인. **미검증(명시)**: 실제 10회 연속 실패 →
+      `camera_disabled` 전환 경로 자체는 고의 재현을 안 해 실기기
+      에서 직접 트리거되지 않음. **남은 문제**: OSD(HDMI/LCD)는
+      카메라와 같은 코드 블록 안에 있어 `camera_disabled` 이후
+      마지막 프레임에 정지(의도적으로 범위 밖), `tracker.run()`
+      (AI 추론 자체)은 이번 작업 대상이 아니라 여전히 미보호,
+      Wi-Fi 부팅 시 최초 연결 실패는 이전 결정대로 여전히 치명적
+      (변경 안 함). **새로 관찰된 사항(미확인, 중요)**: 작업 중
+      `canmv_script_running()` 호출이 실행 중이던 스크립트를
+      트레이스백 없이 soft-reboot시키는 현상을 관찰함 — 이 세션
+      에서 지금까지 이 도구를 "읽기 전용/비파괴적"이라고 가정했던
+      것과 **상충**하는 관찰. 인과관계 확정 안 됨(우연의 일치
+      가능성도 있음) — 추가 확인 전까지는 이 도구도 실행 중인
+      스크립트에 영향을 줄 수 있다고 가정하고 보수적으로 사용할
+      것을 권장.
 
 ## 7. 앞으로의 개선 과제
 

@@ -132,6 +132,14 @@ def run_boot(sleep_fn=None, countdown=(8, 7, 6, 5, 4, 3, 2, 1),
         print("[BOOT] %s present -- skipping auto-launch, REPL only" % safe_mode_path)
         if oled_ui is not None:
             oled_ui.show_stage(("SAFE MODE", "REPL ONLY"))
+        # 의도된 정상 종료 경로(크래시가 아니라 사용자가 SAFE_MODE로
+        # 명시적으로 멈춘 것)이므로, smart_glass_server.main()의
+        # finally와 같은 원칙(정상 종료는 기존대로 정리)을 따라 OLED를
+        # 끈다 -- 화면이 꺼지는 것은 의도된 동작이다. 이후 REPL에서
+        # run_uart.py 등을 수동 실행하면 그쪽이 I2C를 다시 깨끗하게
+        # 연다(docs/DEV_HISTORY.md 4-8, 2026-10-30 발견).
+        if oled is not None:
+            oled_device.close_display(oled)
         return
     except OSError:
         pass

@@ -115,6 +115,48 @@ class RunBootDirectCallTests(unittest.TestCase):
             self.assertEqual(launch_calls, [])
             self.assertEqual(sleeps, [])  # countdown never starts
 
+    def test_safe_mode_present_closes_the_oled_it_opened(self):
+        # docs/DEV_HISTORY.md 4-8 (2026-10-30): run_boot() used to leave
+        # the OLED it opened for "EDGEGLASS-AI/BOOTING" dangling when it
+        # took the SAFE_MODE early-return path, instead of closing it the
+        # same way a normal (non-fatal) shutdown does elsewhere in this
+        # project. _open_oled() itself returns (None, None) under plain
+        # CPython (no `machine` module), so this test monkeypatches the
+        # module's own _open_oled and oled_device to fakes to exercise
+        # the close_display() call that only happens on real hardware.
+        fake_oled = object()
+        close_calls = []
+
+        class _FakeOledUi:
+            def show_stage(self, lines):
+                pass
+
+        class _FakeOledDevice:
+            @staticmethod
+            def close_display(oled):
+                close_calls.append(oled)
+
+        # run_boot's *real* globals dict (what `_open_oled()`/`oled_device`
+        # actually resolve against at call time) is run_boot.__globals__,
+        # NOT self._namespace -- runpy.run_path() returns a *copy* of the
+        # exec namespace, taken after execution already finished, so
+        # mutating that copy would silently do nothing here.
+        real_globals = self._run_boot.__globals__
+        original_open_oled = real_globals["_open_oled"]
+        original_oled_device = real_globals["oled_device"]
+        real_globals["_open_oled"] = lambda: (fake_oled, _FakeOledUi())
+        real_globals["oled_device"] = _FakeOledDevice
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                safe_mode_path = os.path.join(tmp_dir, "SAFE_MODE")
+                with open(safe_mode_path, "w"):
+                    pass
+                self._run_boot(sleep_fn=lambda ms: None, safe_mode_path=safe_mode_path)
+            self.assertEqual(close_calls, [fake_oled])
+        finally:
+            real_globals["_open_oled"] = original_open_oled
+            real_globals["oled_device"] = original_oled_device
+
     def test_safe_mode_absent_runs_full_countdown_then_launches(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             safe_mode_path = os.path.join(tmp_dir, "SAFE_MODE")  # does not exist

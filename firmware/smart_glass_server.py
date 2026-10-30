@@ -138,6 +138,20 @@ BOOT_MIN_STAGE_MS = 400
 # 우선순위표: 지속적 장애는 전체화면, 일시적 장애는 상태줄).
 WIFI_LOST_ALERT_MS = 5000
 
+# 카메라 chn(2) snapshot()이 이 횟수만큼 연속으로 실패하면(docs/DEV_HISTORY.md
+# 6-11, 실기기에서 RuntimeError("...failed(3)")로 재현됨) 더 이상 자동으로
+# 재시도하지 않고 "이번 실행 동안 카메라/AI만 영구 비활성화"로 전환한다.
+# 처음엔 이 한도 도달 시 메인 루프 전체를 break로 끝냈으나(2026-10-30
+# 실기기에서 실제 재현, 섹션 6-11), 그러면 자체 오류가 없는 마우스(UART)/
+# OLED까지 finally에서 같이 종료돼 다른 기능들의 "그 기능만 끄고 계속
+# 돈다" 격리 정책과 불일치한다는 게 밝혀져(사용자 지적) 지금 방식으로
+# 바꿨다 -- 무한정 조용히 프레임을 건너뛰며 "멈춘 것처럼 보이는" 상태로
+# 남기지도 않고, 다른 무고한 기능까지 끌고 내려가지도 않는다. 10은 첫
+# 추정치로, 일시적인 드라이버 hiccup 몇 번은 허용하면서도 진짜 복구
+# 불가능한 상태를 오래 끌지 않도록 잡았다 -- 실기기 재발 패턴을 더 보면
+# 조정 가능.
+AI_FRAME_FAILURE_LIMIT = 10
+
 
 def log(msg):
     print("[ORCH]", msg)
@@ -196,7 +210,12 @@ def _boot_stage_exit(stage_timer):
 def _update_oled(oled_ui, wifi_alert_active, landmarks, action, fps, warning):
     """메인 루프 두 분기(손 있음/없음)가 공유하는 단일 OLED 호출 지점.
     지속적 Wi-Fi 단절 중에는 정상 스켈레톤+상태줄 화면 대신 전체화면
-    경고로 바꿔치기한다 -- 이 "누가 우선인가" 판단을 한 곳에만 둔다."""
+    경고로 바꿔치기한다 -- 이 "누가 우선인가" 판단을 한 곳에만 둔다.
+    카메라/AI가 영구 비활성화된 뒤에는(docs/DEV_HISTORY.md 6-11)
+    main()이 이 함수를 더 이상 호출하지 않고 "CAMERA ERROR" 정적
+    화면을 전환 시점에 한 번만 직접 그린다 -- 매 루프 다시 그릴
+    내용이 없는 정적 화면이라, 여기서 매번 우선순위를 또 판단하게
+    하지 않는다."""
     if oled_ui is None:
         return
     if wifi_alert_active:
@@ -851,10 +870,23 @@ def main(transport_kind=None, enable_web=None, oled=None, oled_ui=None):
         wifi_was_connected = wlan.isconnected() if wlan is not None else None
         wifi_lost_since_ms = None
         wifi_alert_active = False
+        # docs/DEV_HISTORY.md 6-11: sensor.snapshot(chn=CAM_CHN_ID_2)가
+        # RuntimeError("sensor(0) snapshot chn(2) failed(3)")로 실패해
+        # 전체 스크립트가 죽은 실기기 사례. 연속 실패만 센다(성공하면
+        # 바로 0으로 리셋) -- 시간 기반 백오프가 아니라, "카메라가 아예
+        # 복구 불가능해졌는지"를 판단하는 카운터다.
+        ai_frame_failures = 0
+        # True가 되면 다시는 rig.get_ai_frame()을 호출하지 않는다(무한
+        # 재시도 방지). 능동 재초기화(MediaManager 재호출 등)는 과거
+        # 보드가 물리 전원 재인가 없이는 안 풀리는 hang을 일으킨 전례가
+        # 있어(docs/DEV_HISTORY.md) 시도하지 않는다 -- 이번 실행 동안은
+        # 포기하고, 마우스(UART)/OLED/웹/Wi-Fi는 계속 살려둔다.
+        camera_disabled = False
 
         while True:
             frame_count += 1
             hand_result = None  # (det, points) — 웹/디스플레이가 같이 쓰는 캐시
+            ai_frame_fetch_failed = False
 
             # Non-blocking: drains at most one pending reply and sends at
             # most one probe burst, so a Mac that hasn't registered yet (or
@@ -874,15 +906,63 @@ def main(transport_kind=None, enable_web=None, oled=None, oled_ui=None):
                     )
                     mouse_controller.transport.step = lambda now_ms=None: None
 
-            if FEATURE_HAND_RECOGNITION:
-                ai_frame = rig.get_ai_frame()
-                det, points, fallback = tracker.run(ai_frame)
+            if FEATURE_HAND_RECOGNITION and camera_disabled:
+                # 영구 비활성화됨 -- rig.get_ai_frame()을 다시는 호출하지
+                # 않는다. OLED의 "CAMERA ERROR" 화면은 비활성화 전환
+                # 시점에 한 번만 그렸다(아래 참고) -- 내용이 바뀔 일이
+                # 없는 정적 화면을 매 루프 다시 그리면(특히 카메라
+                # 타임아웃이 없어져 루프가 훨씬 빨리 도는 지금 상태에서는)
+                # OLED I2C 버스를 불필요하게 계속 두드리게 된다. OSD
+                # (HDMI/LCD)도 이 블록에서 아예 안 그려 마지막 프레임에
+                # 멈춘 채로 남는다 -- 카메라와 같은 Display 자원을
+                # 공유해 완전히 분리할 수 없는 부분(이번 작업 범위 밖,
+                # 보고서 참고). get_ai_frame()의 ~1000ms 타임아웃이
+                # 더 이상 루프 속도를 눌러주지 않으므로, 마우스/웹
+                # 응답성은 유지하면서도 CPU를 공회전시키지 않을 정도의
+                # 짧은 대기를 둔다.
+                time.sleep_ms(20)
+            elif FEATURE_HAND_RECOGNITION:
+                fetch_start_ms = time.ticks_ms()
+                try:
+                    ai_frame = rig.get_ai_frame()
+                except (RuntimeError, OSError) as error:
+                    # 카메라/센서 VI 드라이버 단계 실패 (docs/DEV_HISTORY.md
+                    # 6-11) -- AI 추론(tracker.run)에는 아예 들어가지도
+                    # 못한 상태. 이 프레임만 "손 없음"으로 처리하고 다음
+                    # 루프에서 다시 시도한다 -- 전체를 죽이지 않는다.
+                    ai_frame_fetch_failed = True
+                    ai_frame_failures += 1
+                    fetch_elapsed_ms = time.ticks_diff(time.ticks_ms(), fetch_start_ms)
+                    # mem_free가 낮지 않다면(보통 그럴 것으로 예상) 일반
+                    # Python 힙 고갈이 아니라는 뜻이다 -- MicroPython
+                    # 힙이 부족했다면 이 예외 자체가 RuntimeError가 아니라
+                    # MemoryError였을 것이다(간접 증거). 카메라 드라이버
+                    # 쪽 버퍼/자원 상태를 직접 조회하는 API는 이 저장소
+                    # 안에서 찾지 못했다 -- 지금 남길 수 있는 가장 직접적인
+                    # 계측은 이 세 값(실패 연속 횟수/소요 시간/일반 힙
+                    # 여유)뿐이다.
+                    log("AI frame fetch failed (%d/%d consecutive): %r "
+                        "fetch_ms=%d mem_free=%d" % (
+                            ai_frame_failures, AI_FRAME_FAILURE_LIMIT, error,
+                            fetch_elapsed_ms, gc.mem_free()))
+                    det, points, fallback = None, None, None
+                else:
+                    ai_frame_failures = 0
+                    det, points, fallback = tracker.run(ai_frame)
 
                 if FEATURE_DISPLAY_OSD:
                     rig.osd_img.clear()
 
                 if det is None or points is None:
                     action = gesture_controller.no_hand() if gesture_controller else "STOP"
+                    if ai_frame_fetch_failed:
+                        # 프레임 자체를 못 받아온 경우엔 gesture_controller의
+                        # grace-period 유지 동작(예: 손이 잠깐 안 보여도
+                        # DRAG를 몇 프레임 더 유지하는 로직)을 신뢰하지
+                        # 않는다 -- 카메라가 복구될지 불확실한 상태에서
+                        # 의도치 않은 이동/드래그가 계속되는 것을 막기
+                        # 위해 무조건 STOP으로 덮어쓴다.
+                        action = "STOP"
                     if mouse_controller is not None:
                         mouse_controller.update(action)
                     if FEATURE_DISPLAY_OSD:
@@ -922,6 +1002,31 @@ def main(transport_kind=None, enable_web=None, oled=None, oled_ui=None):
                 if FEATURE_DISPLAY_OSD:
                     rig.refresh_osd()
 
+                if ai_frame_fetch_failed and ai_frame_failures >= AI_FRAME_FAILURE_LIMIT:
+                    # 더 재시도하지 않고 "카메라/AI만" 이번 실행 동안
+                    # 영구 비활성화한다 -- while 루프 자체는 끝내지
+                    # 않는다(이전에는 여기서 break -> finally가 마우스
+                    # UART/OLED/카메라를 전부 같이 종료시켜, 자체 오류가
+                    # 없는 기능까지 끌고 내려가는 문제가 있었음, 2026-10-30
+                    # 실기기에서 확인, docs/DEV_HISTORY.md 6-11). 마우스는
+                    # 이미 위에서 이번 프레임에 action="STOP"으로 갱신됐지만
+                    # (DRAG 중이었다면 MouseController.update()가 내부적으로
+                    # DRAG_END를 먼저 보냄), 확실히 하기 위해 한 번 더
+                    # 명시적으로 STOP을 보낸다.
+                    camera_disabled = True
+                    log("AI frame fetch failed %d times in a row (limit %d) -- "
+                        "disabling camera/AI for the rest of this run "
+                        "(mouse/web/Wi-Fi/OLED keep running)" % (
+                            ai_frame_failures, AI_FRAME_FAILURE_LIMIT))
+                    if mouse_controller is not None:
+                        mouse_controller.update("STOP")
+                    if oled_ui is not None:
+                        # 정적 화면이라 한 번만 그린다 -- Wi-Fi 경고보다
+                        # 우선순위가 높아(_update_oled 참고) 이후
+                        # wifi_alert_active가 바뀌어도 이 화면 위에
+                        # 다시 그려지지 않는다.
+                        oled_ui.show_alert(("CAMERA ERROR", "AI DISABLED"))
+
             if web_state is not None:
                 web_state.step(rig, hand_result, mouse_controller)
 
@@ -931,6 +1036,15 @@ def main(transport_kind=None, enable_web=None, oled=None, oled_ui=None):
                 fps = (frame_count * 1000.0 / elapsed_ms) if elapsed_ms > 0 else 0.0
                 last_fps = fps
                 log_mem("main_loop frame=%d fps=%.1f" % (frame_count, fps))
+
+                if camera_disabled and frame_count % 300 == 0:
+                    # 저빈도 heartbeat -- 카메라/AI가 꺼진 뒤에도 메인
+                    # 루프(마우스/웹/Wi-Fi)가 계속 살아있다는 걸 USB
+                    # 로그로 확인할 수 있게 한다. 300프레임마다 한 번
+                    # (frame_count % 30 == 0 블록 안에서 또 10번에 1번)
+                    # 이라 매초 단위로 스팸이 되지 않는다.
+                    log("heartbeat: main loop alive, camera/AI still "
+                        "disabled since frame_count=%d" % frame_count)
 
                 if wlan is not None:
                     # 부팅 시 1회만 연결하던 것과 달리, 런타임 중 끊김은
