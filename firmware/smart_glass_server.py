@@ -59,6 +59,8 @@ import wifi
 import ui
 import web_server
 import video_stream
+import failure_backoff
+import boot_stage
 
 # OLED(VLT-OL016) 손 관절 스켈레톤 표시 -- display/의 독립 모듈(평탄화
 # 배포, docs/DEV_HISTORY.md 4-3 참고). 모듈이 이 run에 배포되지 않았거나
@@ -123,6 +125,19 @@ WEB_STREAM_MIN_INTERVAL_MS = 200
 AI_RGB888P_SIZE = [640, 360]
 DISPLAY_MODE = "auto"
 
+# 부팅 단계 OLED 화면 하나당 최소 표시 시간(ms) -- display_config.py의
+# MIN_STAGE_DISPLAY_MS와 같은 의도(firmware/boot_stage.py 참고). OLED
+# 전용 상수 파일에 두지 않고 여기에 중복해 둔 이유: 이 값을 쓰는 코드
+# (아래 _boot_stage_enter/_boot_stage_exit)가 display_config를 몰라도
+#되게 하기 위함 -- OLED가 배포 안 된 SD카드에서도 이 파일 자체의 import는
+# 깨지면 안 된다(기존 oled_device/display_ui try/except 가드와 같은 이유).
+BOOT_MIN_STAGE_MS = 400
+
+# Wi-Fi가 이만큼(ms) 연속으로 끊긴 상태면 OLED가 상태줄 경고 대신 전체화면
+# "WIFI LOST" 알림으로 전환한다(docs/DEV_HISTORY.md 4-8 섹션 B의 상태
+# 우선순위표: 지속적 장애는 전체화면, 일시적 장애는 상태줄).
+WIFI_LOST_ALERT_MS = 5000
+
 
 def log(msg):
     print("[ORCH]", msg)
@@ -154,6 +169,40 @@ if FEATURE_MOUSE_CONTROL and not FEATURE_HAND_RECOGNITION:
 if FEATURE_WEB_JOINTS and not (FEATURE_WEB_VIDEO and FEATURE_HAND_RECOGNITION):
     log("WARNING: FEATURE_WEB_JOINTS는 FEATURE_WEB_VIDEO와"
         " FEATURE_HAND_RECOGNITION이 모두 켜져 있어야 의미가 있습니다.")
+
+
+# ============================================================
+# 부팅 단계 OLED 표시 / 런타임 OLED 표시 우선순위 헬퍼
+# (docs/DEV_HISTORY.md 4-8 섹션 B/C)
+# ============================================================
+
+def _boot_stage_enter(oled_ui, stage_timer, lines):
+    """부팅 단계 화면을 보여주고 최소 표시 시간 타이머를 시작한다.
+    oled_ui가 None이어도(OLED 미배포/초기화 실패) 타이머는 그대로
+    동작시킨다 -- 호출하는 쪽은 매 단계마다 _boot_stage_exit()과 항상
+    짝을 맞춰 호출하면 되고, OLED 유무를 신경 쓸 필요가 없다."""
+    stage_timer.enter()
+    if oled_ui is not None:
+        oled_ui.show_stage(lines)
+
+
+def _boot_stage_exit(stage_timer):
+    """바로 앞서 _boot_stage_enter()로 들어간 단계의 남은 최소 표시
+    시간만큼만 대기한다(실제 초기화 작업이 이미 끝난 뒤에 호출되므로,
+    작업 자체를 지연시키지 않는다 -- firmware/boot_stage.py 참고)."""
+    stage_timer.wait_min()
+
+
+def _update_oled(oled_ui, wifi_alert_active, landmarks, action, fps, warning):
+    """메인 루프 두 분기(손 있음/없음)가 공유하는 단일 OLED 호출 지점.
+    지속적 Wi-Fi 단절 중에는 정상 스켈레톤+상태줄 화면 대신 전체화면
+    경고로 바꿔치기한다 -- 이 "누가 우선인가" 판단을 한 곳에만 둔다."""
+    if oled_ui is None:
+        return
+    if wifi_alert_active:
+        oled_ui.show_alert(("WIFI LOST", "RECONNECTING"))
+    else:
+        oled_ui.update(landmarks, action, fps=fps, warning=warning)
 
 
 # ============================================================
@@ -300,10 +349,57 @@ class WebState:
         self.frame_interval_ms = WEB_STREAM_MIN_INTERVAL_MS  # 0이면 매 루프마다 보냄
         self._stream_frame_count = 0
         self._stream_start_ms = 0
+        self.enabled = False      # start()가 성공해야 True (bind 실패 시 False로 남음)
+        self.start_error = None   # start() 실패 사유(repr) -- OLED/로그/REPL 재시작 판단용
+        self._port = None
+        # /stream의 MemoryError(JPEG 인코더 전용 버퍼 풀 고갈 가설,
+        # docs/DEV_HISTORY.md 4-8) 전용 백오프 -- 일반 OSError/ValueError
+        # (TCP 리셋/stall/deadline)는 세지 않는다. 연속 3회면 자동
+        # 재시도를 멈춘다(무제한 재압축으로 상황을 악화시키지 않기 위함).
+        self._video_backoff = failure_backoff.FailureBackoff(
+            delays_ms=(5000, 10000), max_failures=3)
 
     def start(self, port):
-        self.server = web_server.HttpServer(port).start()
+        """bind/listen 실패(OSError)를 여기서 끝낸다 -- main()까지
+        전파되지 않으므로 AI/마우스/OLED는 전혀 영향받지 않는다
+        (docs/DEV_HISTORY.md 4-8 섹션 F)."""
+        self._port = port
+        try:
+            self.server = web_server.HttpServer(port).start()
+        except OSError as e:
+            self.enabled = False
+            self.start_error = repr(e)
+            log("web server failed to start on port %d: %r "
+                "(web disabled for this run -- AI/mouse/OLED unaffected)" % (port, e))
+            return
+        self.enabled = True
+        self.start_error = None
         log("web server listening on port %d" % port)
+
+    def restart(self, port=None):
+        """수동 복구 경로 -- USB REPL에서 bind 실패 원인을 해결한 뒤
+        직접 호출한다(docs/DEV_HISTORY.md 4-8 섹션 E). 이 객체 자신의
+        TCP 리스닝 소켓만 다루며, 카메라/AI/마우스/OLED는 전혀
+        건드리지 않는다. 별도 프로세스를 새로 띄우는 방식이 아니다
+        (MicroPython 단일 실행 환경이라 그런 개념이 없음)."""
+        if self.server is not None:
+            self.server.close()
+            self.server = None
+        self.active = None
+        self.streaming = False
+        self.start(port if port is not None else self._port)
+        return self.enabled
+
+    def warning_code(self):
+        """OLED 상태줄용 짧은 코드(DisplayUI.update()의 warning 인자,
+        docs/DEV_HISTORY.md 4-8 섹션 B)."""
+        if not self.enabled:
+            return "WX"
+        if self._video_backoff.exhausted():
+            return "M!"
+        if self._video_backoff.failure_count > 0:
+            return "W!"
+        return None
 
     def step(self, rig, hand_result, mouse_controller=None):
         """메인 루프에서 매 프레임 한 번씩 호출. 블로킹하지 않는다."""
@@ -336,6 +432,15 @@ class WebState:
                 self._route(rig, hand_result, session, path, mouse_controller)
 
             if session.state == web_server.ClientSession.STATE_SENDING:
+                # 진행이 아예 없거나(stall), 조금씩만 나가서(trickle) stall
+                # 기준은 계속 리셋되지만 전체 소요 시간이 데드라인을 넘긴
+                # 경우를 잡아낸다 -- docs/DEV_HISTORY.md 6-10 참고. OSError를
+                # 던지면 바로 아래 except에서 session.close()+self.active=None
+                # 으로 정리되고, 다음 step() 호출에서 HttpServer.accept()가
+                # 새 연결을 다시 받는다(리스닝 소켓은 세션과 독립적으로 계속
+                # 살아있음 -- tests/test_web_server.py의 재연결 통합 테스트로
+                # 확인함).
+                session.check_send_timeout()
                 done = session.pump_send()
                 if done:
                     if self.streaming:
@@ -361,6 +466,7 @@ class WebState:
                     # WEB_STREAM_MIN_INTERVAL_MS above for why this matters.
                     return
                 jpeg, encode_ms = self._capture_web_jpeg(rig, hand_result)
+                self._video_backoff.record_success()
                 self.last_frame_sent_ms = now_ms
                 self._stream_frame_count += 1
                 if self._stream_frame_count <= 3 or self._stream_frame_count % 10 == 0:
@@ -369,7 +475,13 @@ class WebState:
                     debug_log("/stream frame=%d bytes=%d encode_ms=%d elapsed_ms=%d fps=%.1f mem_free=%d" % (
                         self._stream_frame_count, len(jpeg), encode_ms, elapsed_ms, fps, gc.mem_free()))
                 session.queue(web_server.mjpeg_part(jpeg))
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, MemoryError) as e:
+            if isinstance(e, MemoryError):
+                # docs/DEV_HISTORY.md 4-8: img.compress() 내부의 K230 전용
+                # 버퍼 풀(가설) 고갈. 일반 OSError/ValueError(TCP
+                # 리셋/stall/deadline)는 이 백오프에 넣지 않는다 -- 그런
+                # 것들은 네트워크 사정일 뿐 메모리 문제가 아니다.
+                self._video_backoff.record_failure()
             if self.streaming:
                 elapsed_ms = time.ticks_diff(time.ticks_ms(), self._stream_start_ms)
                 log("/stream ended frames=%d elapsed_ms=%d err=%r" % (
@@ -381,18 +493,42 @@ class WebState:
             self.streaming = False
 
     def _capture_web_jpeg(self, rig, hand_result):
+        """JPEG 인코딩 1회 시도 + (Compression Failed/MemoryError 각각)
+        1회까지만 재시도 -- 무제한 재시도로 메모리 상황을 악화시키지
+        않는다(docs/DEV_HISTORY.md 4-8 섹션 D "근본 원인 조사" 참고).
+
+        MemoryError에 대한 gc.collect() 재시도는 "해결"이 아니라 비용이
+        거의 없는(프레임당 최대 1회) 방어적 조치일 뿐이다 -- 발생 위치
+        (img.compress(), K230 벤더 C 확장)로 볼 때 일반 Python 힙이
+        아니라 이미지 인코더 전용 하드웨어 버퍼 풀 고갈일 가능성이 더
+        높다는 가설이 있고(미확인, 외부 자료로 간접 뒷받침만 됨), 그
+        경우 gc.collect()는 애초에 효과가 없다. mem_free() 전후
+        비교는 VERBOSE_ORCHESTRATOR_LOGS를 켰을 때만 찍히며, 이 가설을
+        실기기에서 검증할 최소 계측이다.
+        """
         for attempt in range(2):
             img = rig.get_web_frame()
             if FEATURE_WEB_JOINTS and hand_result is not None:
                 det, points = hand_result
                 ui.draw_landmarks(img, det, points, AI_RGB888P_SIZE,
                                   [WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT])
+            mem_before = gc.mem_free()
             try:
-                return video_stream.encode_jpeg(img, quality=WEB_JPEG_QUALITY)
+                jpeg, encode_ms = video_stream.encode_jpeg(img, quality=WEB_JPEG_QUALITY)
+                debug_log("jpeg encode ok mem_free_before=%d mem_free_after=%d" % (
+                    mem_before, gc.mem_free()))
+                return jpeg, encode_ms
             except OSError as e:
                 if attempt != 0 or "Compression Failed" not in str(e):
                     raise
                 log("JPEG compression failed once; retrying with a new frame")
+                gc.collect()
+            except MemoryError:
+                debug_log("jpeg encode MemoryError mem_free_before=%d mem_free_after_gc=%d" % (
+                    mem_before, gc.mem_free()))
+                if attempt != 0:
+                    raise
+                log("JPEG MemoryError once; retrying once after gc.collect()")
                 gc.collect()
 
     def _route(self, rig, hand_result, session, path, mouse_controller=None):
@@ -412,17 +548,57 @@ class WebState:
         elif path == "/register" and session.method == "POST":
             self._handle_register(session, mouse_controller)
         elif path == "/stream" and FEATURE_WEB_VIDEO:
+            if not self._video_backoff.should_attempt():
+                log("/stream rejected: web video backing off after repeated MemoryError")
+                body = b'{"status":"EDGEGLASS_WEB_VIDEO_BACKOFF"}'
+                session.queue(web_server.http_response(
+                    "503 Service Unavailable", "application/json", body))
+                return
             log("/stream start")
             self.streaming = True
             self._stream_frame_count = 0
             self._stream_start_ms = time.ticks_ms()
             session.queue(web_server.MJPEG_STREAM_HEADER)
         else:
+            # 브라우저 쪽 자동 재연결 -- 서버의 TCP 전송 로직(web_server.py)과는
+            # 완전히 분리된, 순수 클라이언트 JS다. 서버가 이제 정체된 전송을
+            # 5초 안에 포기하므로(docs/DEV_HISTORY.md 6-10), 모든 정체는
+            # 결국 이 <img>에 에러 이벤트로 나타난다 -- 그래서 "에러 없이
+            # 조용히 멈추는" 경우를 따로 감지할 타이머는 필요 없다. 재연결은
+            # 1초부터 지수 백오프(최대 8초)로, 중복 재연결은 retryTimer로
+            # 막는다. healthyTimer는 onload(멀티파트 스트림에서 매 프레임마다
+            # 확실히 불린다는 보장이 없어 믿지 않음)가 아니라 "에러 없이 N초
+            # 지속"으로만 백오프를 리셋한다 -- Wi-Fi가 완전히 끊긴 경우는
+            # 재시도마다 금방 또 실패해 백오프가 계속 늘어나고, 일시적
+            # 정체였다면 한 번 복구된 뒤 자연히 리셋된다(서버 쪽 복구와는
+            # 독립적으로 동작).
             body = (
                 b"<!doctype html><html><head><meta charset='utf-8'>"
                 b"<title>EdgeGlass-AI</title></head><body>"
                 b"<h1>EdgeGlass-AI</h1>"
-                b"<img src=\"/stream\" width=\"%d\" height=\"%d\">"
+                b"<img id=\"stream\" src=\"/stream\" width=\"%d\" height=\"%d\">"
+                b"<script>"
+                b"(function(){"
+                b"var img=document.getElementById('stream');"
+                b"var retryTimer=null,healthyTimer=null,failures=0;"
+                b"var MIN_MS=1000,MAX_MS=8000,HEALTHY_MS=5000;"
+                b"function connect(){"
+                b"retryTimer=null;"
+                b"img.src='/stream?_='+Date.now();"
+                b"clearTimeout(healthyTimer);"
+                b"healthyTimer=setTimeout(function(){failures=0;},HEALTHY_MS);"
+                b"}"
+                b"function scheduleRetry(){"
+                b"clearTimeout(healthyTimer);"
+                b"if(retryTimer!==null)return;"
+                b"var delay=Math.min(MAX_MS,MIN_MS*Math.pow(2,failures));"
+                b"failures+=1;"
+                b"retryTimer=setTimeout(connect,delay);"
+                b"}"
+                b"img.onerror=function(){img.removeAttribute('src');scheduleRetry();};"
+                b"connect();"
+                b"})();"
+                b"</script>"
                 b"</body></html>" % (WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT)
             )
             session.queue(web_server.http_response("200 OK", "text/html; charset=utf-8", body))
@@ -468,7 +644,7 @@ class WebState:
         session.queue(web_server.http_response("200 OK", "application/json", body))
 
 
-def main(transport_kind=None, enable_web=None):
+def main(transport_kind=None, enable_web=None, oled=None, oled_ui=None):
     """Run the orchestrator loop.
 
     ``transport_kind`` ("uart"/"udp") and ``enable_web`` let a thin entry
@@ -476,6 +652,13 @@ def main(transport_kind=None, enable_web=None):
     without editing config.py or the FEATURE_* constants above. Calling
     main() with no arguments (e.g. running this file directly) keeps the
     previous config.py-driven behavior.
+
+    ``oled``/``oled_ui``: pass these in when the caller already brought the
+    OLED up itself (tools/autorun/main.py does, so it can show boot-stage
+    screens starting before the SAFE_MODE countdown -- docs/DEV_HISTORY.md
+    4-8) instead of this function opening I2C a second time. If not given,
+    this function brings the OLED up itself at the same point it always
+    has, unchanged, for direct callers (run_uart.py/run_wifi.py).
     """
     global FEATURE_WEB_SERVER
     if enable_web is not None:
@@ -488,10 +671,12 @@ def main(transport_kind=None, enable_web=None):
     tracker = None
     web_state = None
     wlan = None
-    oled = None
-    oled_ui = None
+    wifi_networks = []
+    fatal_error = None
+    stage_timer = boot_stage.BootStageTimer(BOOT_MIN_STAGE_MS)
 
     try:
+        _boot_stage_enter(oled_ui, stage_timer, ("CAMERA", "INITIALIZING"))
         rig.create(
             enable_display=FEATURE_DISPLAY_OSD,
             enable_ai=FEATURE_HAND_RECOGNITION,
@@ -500,14 +685,21 @@ def main(transport_kind=None, enable_web=None):
             web_size=[WEB_FRAME_WIDTH, WEB_FRAME_HEIGHT],
             display_mode=DISPLAY_MODE,
         )
+        _boot_stage_exit(stage_timer)
 
         if FEATURE_HAND_RECOGNITION:
+            _boot_stage_enter(oled_ui, stage_timer, ("AI MODELS", "LOADING"))
             hand_det_model = "/sdcard/examples/kmodel/hand_det.kmodel"
             hand_kp_model = "/sdcard/examples/kmodel/handkp_det.kmodel"
             tracker = HandTracker(hand_det_model, hand_kp_model, AI_RGB888P_SIZE)
             gesture_controller = GestureController(AI_RGB888P_SIZE)
+            _boot_stage_exit(stage_timer)
 
-        if FEATURE_DISPLAY_OLED:
+        if FEATURE_DISPLAY_OLED and oled is None:
+            # Not pre-built by the caller -- bring it up here exactly as
+            # before (unchanged path for run_uart.py/run_wifi.py, which
+            # never show the earlier boot-stage screens anyway since they
+            # skip tools/autorun/main.py's countdown entirely).
             if oled_device is not None and display_ui is not None:
                 oled = oled_device.open_display()
                 if oled is not None:
@@ -518,10 +710,13 @@ def main(transport_kind=None, enable_web=None):
             else:
                 log("OLED modules (oled_device/display_ui) not deployed -- "
                     "OLED display disabled for this run")
+        elif FEATURE_DISPLAY_OLED and oled is not None and oled_ui is None:
+            oled_ui = display_ui.DisplayUI(oled)
 
         ifconfig = None
         banner_lines = []
 
+        _boot_stage_enter(oled_ui, stage_timer, ("WIFI", "CONNECTING"))
         if transport.wifi_is_needed(FEATURE_WEB_SERVER, FEATURE_MOUSE_CONTROL, mouse_transport_kind):
             # One shared STA connection for both the web server and the UDP
             # mouse transport. wifi.connect_if_needed() reuses an already
@@ -552,7 +747,11 @@ def main(transport_kind=None, enable_web=None):
                 " (%s)" % connected_ssid if connected_ssid else ""
             ))
             banner_lines.append("[Wi-Fi] Board IP: %s" % ifconfig[0])
+        elif oled_ui is not None:
+            oled_ui.show_stage(("WIFI", "OFF"))
+        _boot_stage_exit(stage_timer)
 
+        _boot_stage_enter(oled_ui, stage_timer, ("MOUSE", "INITIALIZING"))
         if FEATURE_MOUSE_CONTROL:
             # A UDP/discovery setup failure (e.g. subnet too large, no NIC
             # yet) must not take camera/AI/web down with it -- it only means
@@ -600,13 +799,30 @@ def main(transport_kind=None, enable_web=None):
                     banner_lines.append(
                         "[UDP] Fixed target: %s:%s" % (config.MOUSE_UDP_HOST, config.MOUSE_UDP_PORT)
                     )
+            elif oled_ui is not None:
+                oled_ui.show_stage(("MOUSE", "DISABLED"))
+        elif oled_ui is not None:
+            oled_ui.show_stage(("MOUSE", "OFF"))
+        _boot_stage_exit(stage_timer)
 
+        _boot_stage_enter(oled_ui, stage_timer, ("WEB SERVER", "STARTING"))
         if FEATURE_WEB_SERVER:
             web_state = WebState()
             web_state.start(WEB_PORT)
-            banner_lines.append("[WEB] Server started")
-            if ifconfig:
-                banner_lines.append("[WEB] URL: http://%s:%d/" % (ifconfig[0], WEB_PORT))
+            if web_state.enabled:
+                banner_lines.append("[WEB] Server started")
+                if ifconfig:
+                    banner_lines.append("[WEB] URL: http://%s:%d/" % (ifconfig[0], WEB_PORT))
+            else:
+                banner_lines.append(
+                    "[WEB] Server failed to start: %s "
+                    "(web disabled for this run -- AI/mouse/OLED unaffected)"
+                    % web_state.start_error)
+                if oled_ui is not None:
+                    oled_ui.show_stage(("WEB SERVER", "FAILED"))
+        elif oled_ui is not None:
+            oled_ui.show_stage(("WEB SERVER", "OFF"))
+        _boot_stage_exit(stage_timer)
 
         if FEATURE_HAND_RECOGNITION:
             banner_lines.append("[AI] Gesture tracking started")
@@ -622,11 +838,19 @@ def main(transport_kind=None, enable_web=None):
             banner_print(line)
         banner_print("==================================")
 
+        _boot_stage_enter(oled_ui, stage_timer, ("SYSTEM READY",))
+        _boot_stage_exit(stage_timer)
+
         log_mem("STEP: after all init, before loop")
         frame_count = 0
         last_action = None
         last_fps = None  # 30프레임마다만 갱신, OLED 상태줄에는 그 사이 마지막 값을 보여준다
         loop_start_ms = time.ticks_ms()
+        wifi_backoff = failure_backoff.FailureBackoff(
+            delays_ms=(3000, 10000, 30000), max_failures=None)
+        wifi_was_connected = wlan.isconnected() if wlan is not None else None
+        wifi_lost_since_ms = None
+        wifi_alert_active = False
 
         while True:
             frame_count += 1
@@ -670,7 +894,8 @@ def main(transport_kind=None, enable_web=None):
                         # treats this as "no hand" and draws nothing but the
                         # status bar (canvas.fill(0) runs first every call),
                         # so no stale skeleton from a previous frame lingers.
-                        oled_ui.update(None, action, fps=last_fps)
+                        _update_oled(oled_ui, wifi_alert_active, None, action, last_fps,
+                                     web_state.warning_code() if web_state is not None else None)
                     if action != last_action:
                         log("ACTION: %s" % action)
                         last_action = action
@@ -691,7 +916,8 @@ def main(transport_kind=None, enable_web=None):
                         # (see hand_tracker.py's HandKeypoint.postprocess());
                         # hand_renderer expects 21 (x,y) pairs.
                         oled_landmarks = [(points[i * 2], points[i * 2 + 1]) for i in range(21)]
-                        oled_ui.update(oled_landmarks, action, fps=last_fps)
+                        _update_oled(oled_ui, wifi_alert_active, oled_landmarks, action, last_fps,
+                                     web_state.warning_code() if web_state is not None else None)
 
                 if FEATURE_DISPLAY_OSD:
                     rig.refresh_osd()
@@ -706,9 +932,40 @@ def main(transport_kind=None, enable_web=None):
                 last_fps = fps
                 log_mem("main_loop frame=%d fps=%.1f" % (frame_count, fps))
 
+                if wlan is not None:
+                    # 부팅 시 1회만 연결하던 것과 달리, 런타임 중 끊김은
+                    # 지금까지 아무도 감지하지 않고 있었다(docs/DEV_HISTORY.md
+                    # 4-8). 기존 30프레임 주기를 재사용 -- 새 타이머를
+                    # 따로 만들지 않는다. Wi-Fi는 bind 실패(웹서버)와
+                    # 달리 "포기"하지 않고 계속 재시도한다(max_failures=None)
+                    # -- 물리적으로 다시 붙을 가능성이 늘 있기 때문.
+                    now_ms = time.ticks_ms()
+                    wifi_connected = wlan.isconnected()
+                    if wifi_connected:
+                        if wifi_was_connected is False:
+                            banner_print("[Wi-Fi] reconnected")
+                        wifi_backoff.record_success()
+                        wifi_lost_since_ms = None
+                        wifi_alert_active = False
+                    else:
+                        if wifi_was_connected:
+                            wifi_lost_since_ms = now_ms
+                            banner_print("[Wi-Fi] connection lost, will retry in background")
+                        if wifi_lost_since_ms is not None:
+                            wifi_alert_active = (
+                                time.ticks_diff(now_ms, wifi_lost_since_ms) > WIFI_LOST_ALERT_MS)
+                        if wifi_backoff.should_attempt(now_ms):
+                            wifi_backoff.record_failure(now_ms)
+                            try:
+                                wifi.connect_if_needed(wifi_networks, on_progress=banner_print)
+                            except OSError as error:
+                                banner_print("[Wi-Fi] reconnect attempt failed: %r" % (error,))
+                    wifi_was_connected = wifi_connected
+
     except KeyboardInterrupt:
         log("stopped by user")
     except BaseException as error:
+        fatal_error = error
         sys.print_exception(error)
         raise
     finally:
@@ -718,7 +975,20 @@ def main(transport_kind=None, enable_web=None):
         if mouse_controller is not None:
             mouse_controller.close()
         if oled is not None:
-            oled_device.close_display(oled)
+            if fatal_error is not None and oled_ui is not None:
+                # 치명적 크래시: 화면을 꺼지 않고 마지막 정보를 남겨둔다
+                # (docs/DEV_HISTORY.md 4-8 섹션 C). 사용자의 의도적 중단
+                # (KeyboardInterrupt)이나 정상 종료는 여기 안 들어오므로
+                # 기존 poweroff 동작이 그대로 유지된다. 전체 Traceback은
+                # 이미 위 sys.print_exception()으로 USB 로그(별도
+                # mac/serial_logger.py)에 남고, OLED에는 요약만 둔다.
+                oled_ui.show_fatal_error((
+                    "FATAL",
+                    type(fatal_error).__name__[:16],
+                    str(fatal_error)[:16],
+                ))
+            else:
+                oled_device.close_display(oled)
         rig.destroy()
         log("cleanup done")
 

@@ -54,12 +54,20 @@ class DisplayUI:
         self._last_update_ms = None
         self._skeleton_area_height = config.OLED_HEIGHT - config.STATUS_BAR_HEIGHT
 
-    def update(self, landmarks, gesture, fps=None, now_ms=None, force=False):
+    def update(self, landmarks, gesture, fps=None, now_ms=None, force=False, warning=None):
         """Redraw if enough time passed since the last redraw (or
         force=True). Returns True if it actually redrew, False if
         throttled or skipped. Never raises -- a canvas/I2C error is logged
         and swallowed (section 9: a broken display must not take the
         caller's loop down with it).
+
+        ``warning`` is an optional short string (at most 4 chars are
+        shown) drawn in the status bar's otherwise-unused gap between the
+        FPS field and the hand-present indicator -- see docs/DEV_HISTORY.md
+        4-8: a one-time-fatal or persistent-but-isolated failure (e.g. the
+        web /stream backing off after a MemoryError) is surfaced here
+        *without* leaving the skeleton screen, per the "웹서버만 실패한
+        경우 전체 시스템의 치명적 오류로 처리하지 마" requirement.
         """
         if self.canvas is None:
             return False
@@ -70,14 +78,14 @@ class DisplayUI:
                 return False
 
         try:
-            self._draw(landmarks, gesture, fps)
+            self._draw(landmarks, gesture, fps, warning)
         except Exception as e:
             print("[OLED] update() draw failed:", repr(e))
             return False
         self._last_update_ms = now_ms
         return True
 
-    def _draw(self, landmarks, gesture, fps):
+    def _draw(self, landmarks, gesture, fps, warning=None):
         canvas = self.canvas
         canvas.fill(0)
 
@@ -93,8 +101,54 @@ class DisplayUI:
             if p is not None:
                 self._draw_joint(canvas, p[0], p[1])
 
-        self._draw_status_bar(canvas, gesture, fps, hand_present)
+        self._draw_status_bar(canvas, gesture, fps, hand_present, warning)
         canvas.show()
+
+    # ============================================================
+    # Full-screen text modes -- boot stages, persistent alerts, and the
+    # final fatal-error screen all share the same plain-text layout
+    # (docs/DEV_HISTORY.md 4-8). These bypass min_interval_ms entirely:
+    # each call is an explicit, discrete event from the caller (a boot
+    # stage changing, an alert condition starting/clearing), not a
+    # per-frame redraw, so throttling it would just drop real transitions.
+    # ============================================================
+
+    def show_stage(self, lines):
+        """Boot-stage screen (e.g. ["CAMERA", "INITIALIZING"]). Caller is
+        responsible for any minimum-display-time pacing (see
+        firmware/boot_stage.py) -- this just draws immediately."""
+        return self._show_fullscreen(lines)
+
+    def show_alert(self, lines):
+        """Persistent-but-non-fatal full-screen alert (e.g. ["WIFI LOST",
+        "RETRY 3"]). The caller keeps calling this while the condition
+        holds and simply resumes calling update() once it clears -- there
+        is no separate "clear" call."""
+        return self._show_fullscreen(lines)
+
+    def show_fatal_error(self, lines):
+        """Last-resort screen for an unrecoverable crash. The caller is
+        expected to stop calling update()/show_*() afterward and skip
+        powering the display off, so this stays on screen (see main()'s
+        finally block design, docs/DEV_HISTORY.md 4-8 section C). Never
+        raises -- if the canvas/I2C write itself fails here (e.g. the
+        process is out of memory), there is nothing further we can do."""
+        return self._show_fullscreen(lines)
+
+    def _show_fullscreen(self, lines):
+        if self.canvas is None:
+            return False
+        try:
+            canvas = self.canvas
+            canvas.fill(0)
+            line_height = 10
+            for i, text in enumerate(lines):
+                canvas.text(str(text)[: config.OLED_WIDTH // 8], 0, 2 + i * line_height, 1)
+            canvas.show()
+        except Exception as e:
+            print("[OLED] show_fullscreen() draw failed:", repr(e))
+            return False
+        return True
 
     def _draw_joint(self, canvas, x, y):
         # A single pixel reads as part of the connecting line rather than a
@@ -110,7 +164,7 @@ class DisplayUI:
         else:
             canvas.pixel(x, y, 1)
 
-    def _draw_status_bar(self, canvas, gesture, fps, hand_present):
+    def _draw_status_bar(self, canvas, gesture, fps, hand_present, warning=None):
         bar_y = config.OLED_HEIGHT - config.STATUS_BAR_HEIGHT
         canvas.hline(0, bar_y, config.OLED_WIDTH, 1)
         text_y = bar_y + 2
@@ -134,5 +188,11 @@ class DisplayUI:
         else:
             fps_text = "  --"
         canvas.text(fps_text, 56, text_y, 1)
+
+        # Gap between the FPS field (ends at 56+4*8=88px) and the
+        # hand-present indicator (starts at 120px) -- exactly 4 chars
+        # (32px) unused until now. See update()'s ``warning`` docstring.
+        if warning:
+            canvas.text(str(warning)[:4], 88, text_y, 1)
 
         canvas.text("H" if hand_present else "-", 120, text_y, 1)

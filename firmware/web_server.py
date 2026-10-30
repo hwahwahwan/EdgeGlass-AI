@@ -21,6 +21,36 @@ import socket
 import select
 import time
 
+# ============================================================
+# 스트리밍 전송 안정화 설정 (docs/DEV_HISTORY.md 6-10)
+# ============================================================
+#
+# 세 기능을 각각 독립적으로 끄고 켤 수 있다 -- 하나가 문제를 일으키면
+# 그 상수만 False로 되돌리면 된다(별도 파일로 떼지 않은 이유는 셋 다
+# ClientSession의 소켓/내부 상태를 직접 다뤄야 해서, 분리하면 오히려
+# 상태를 두 곳에서 관리하게 되기 때문 -- 아래 ClientSession이 소켓
+# 소유권과 종료 책임을 유일하게 가진다).
+
+# 한 번의 non-blocking send() 호출에 넘기는 최대 바이트 수. CanMV 공식
+# ai_mjpeg_web_server.py 예제와 동일한 16KiB -- 큰 JPEG 프레임 하나를
+# 통째로 send()에 넘기지 않고 쪼개서, RT-Smart 소켓 계층이 큰 단일
+# 버퍼를 어떻게 처리하는지에 대한 불확실성을 없앤다(실측으로 문제가
+# 있었던 건 아니고, 공식 패턴을 따라가는 예방적 조치).
+ENABLE_CHUNKED_SEND = True
+SEND_CHUNK_BYTES = 16384
+
+# 전송 "진행" 기준 정지 감지 -- pump_send()가 1바이트라도 보낼 때마다
+# 리셋된다. 네트워크가 완전히 끊기면 이게 걸린다.
+ENABLE_SEND_STALL_TIMEOUT = True
+SEND_STALL_TIMEOUT_MS = 5000
+
+# 전송 "시작 시점" 기준 고정 데드라인 -- 중간에 바이트가 나가도 절대
+# 리셋되지 않는다. 네트워크가 완전히 끊기지 않고 아주 조금씩만("트리클")
+# 나가서 위 stall timeout이 영원히 리셋되는 경우를 잡아낸다. 초기
+# 테스트값 5000ms, 실측 결과에 따라 조정 가능.
+ENABLE_FRAME_DEADLINE = True
+FRAME_DEADLINE_MS = 5000
+
 
 def error_code(error):
     return getattr(error, "errno", error.args[0] if error.args else None)
@@ -149,17 +179,29 @@ class ClientSession:
     STATE_DONE = "done"
 
     def __init__(self, sock, addr, request_timeout_ms=3000, max_request_bytes=4096,
-                 idle_timeout_ms=20000):
+                 idle_timeout_ms=20000, send_stall_timeout_ms=SEND_STALL_TIMEOUT_MS,
+                 frame_deadline_ms=FRAME_DEADLINE_MS):
         self.sock = sock
         self.addr = addr
         self.request_timeout_ms = request_timeout_ms
         self.max_request_bytes = max_request_bytes
         self.idle_timeout_ms = idle_timeout_ms
+        # 둘 다 전송(STATE_SENDING) 전용 -- is_stale()의 idle_timeout_ms와는
+        # 별개다. send_stall_timeout_ms: 마지막으로 바이트가 조금이라도
+        # 나간 시점부터 몇 ms(진행 기준, pump_send가 보낼 때마다 리셋).
+        # frame_deadline_ms: 이번 전송을 시작한 시점부터 몇 ms(고정 기준,
+        # 중간에 바이트가 나가도 절대 리셋 안 됨) -- 네트워크가 완전히
+        # 끊기진 않고 아주 조금씩만("트리클") 나가면 진행 기준 타이머는
+        # 계속 리셋돼서 영원히 안 걸리므로, 이 고정 데드라인이 그 경우를
+        # 잡아낸다(docs/DEV_HISTORY.md 6-10 참고).
+        self.send_stall_timeout_ms = send_stall_timeout_ms
+        self.frame_deadline_ms = frame_deadline_ms
 
         self._request_buf = bytearray()
         self._request_deadline = time.ticks_add(time.ticks_ms(), request_timeout_ms)
         self._send_view = None
         self._send_offset = 0
+        self._send_frame_started_ms = None
         self._headers_parsed = False
         self._body_start = 0
 
@@ -173,6 +215,34 @@ class ClientSession:
 
     def is_stale(self):
         return time.ticks_diff(time.ticks_ms(), self.last_progress_ms) > self.idle_timeout_ms
+
+    def check_send_timeout(self):
+        """STATE_SENDING일 때만 의미가 있다. 둘 중 하나라도 넘으면
+        OSError를 던진다(호출자가 이미 OSError/ValueError를 세션 종료
+        신호로 처리하고 있으므로 그대로 재사용) -- 메시지에 어느 기준을
+        넘었는지와 진단용 프레임 크기/전송량을 그대로 담아, 호출자가
+        추가 가공 없이 로그만 남기면 두 원인이 구분된다.
+        """
+        if self.state != self.STATE_SENDING or self._send_frame_started_ms is None:
+            return
+        if not (ENABLE_SEND_STALL_TIMEOUT or ENABLE_FRAME_DEADLINE):
+            return
+        now_ms = time.ticks_ms()
+        frame_size = len(self._send_view) if self._send_view is not None else 0
+        if ENABLE_SEND_STALL_TIMEOUT:
+            since_progress_ms = time.ticks_diff(now_ms, self.last_progress_ms)
+            if since_progress_ms > self.send_stall_timeout_ms:
+                raise OSError(
+                    "send stalled: no progress for %dms (limit %dms), frame_size=%d sent=%d"
+                    % (since_progress_ms, self.send_stall_timeout_ms, frame_size, self._send_offset)
+                )
+        if ENABLE_FRAME_DEADLINE:
+            since_start_ms = time.ticks_diff(now_ms, self._send_frame_started_ms)
+            if since_start_ms > self.frame_deadline_ms:
+                raise OSError(
+                    "send frame deadline exceeded: %dms total (limit %dms), frame_size=%d sent=%d"
+                    % (since_start_ms, self.frame_deadline_ms, frame_size, self._send_offset)
+                )
 
     def pump_read(self):
         """한 번만 non-blocking recv 시도. 요청(헤더+본문)이 다 왔으면 path를 반환.
@@ -237,21 +307,34 @@ class ClientSession:
         return self.path
 
     def queue(self, data):
-        """새 응답/프레임 바이트를 전송 대기열에 올린다."""
+        """새 응답/프레임 바이트를 전송 대기열에 올린다.
+
+        ``_send_frame_started_ms``와 ``last_progress_ms``를 여기서 같은
+        시점으로 리셋한다 -- frame_deadline_ms는 "이번 전송이 시작된
+        시점" 기준이어야 하므로, 이전 전송의 흔적이 남아있으면 안 된다.
+        """
         self._send_view = memoryview(data)
         self._send_offset = 0
         self.state = self.STATE_SENDING
+        now_ms = time.ticks_ms()
+        self._send_frame_started_ms = now_ms
+        self.last_progress_ms = now_ms
 
     def pump_send(self):
         """한 번만 non-blocking send 시도. 전부 보냈으면 True, 아니면 False.
 
         EAGAIN/일시적 오류는 False로 흡수(다음 루프에 재시도), 그 외
-        OSError는 그대로 올린다.
+        OSError는 그대로 올린다. ENABLE_CHUNKED_SEND가 켜져 있으면 한
+        번에 SEND_CHUNK_BYTES까지만 send()에 넘긴다.
         """
         if self._send_view is None:
             return True
         try:
-            sent = self.sock.send(self._send_view[self._send_offset:])
+            if ENABLE_CHUNKED_SEND:
+                end = min(self._send_offset + SEND_CHUNK_BYTES, len(self._send_view))
+                sent = self.sock.send(self._send_view[self._send_offset:end])
+            else:
+                sent = self.sock.send(self._send_view[self._send_offset:])
         except OSError as e:
             if error_code(e) in (11, 110):
                 return False

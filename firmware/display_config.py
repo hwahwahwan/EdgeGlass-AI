@@ -66,3 +66,14 @@ SKELETON_MARGIN_PX = 2   # keep the skeleton a couple pixels off every edge
 # (docs/WORK_TRACKER.md section M/N) -- a slow peripheral's own refresh
 # rate shouldn't dictate how often the caller is allowed to ask.
 MIN_UPDATE_INTERVAL_MS = 100
+
+# ============================================================
+# Boot-stage screens (docs/DEV_HISTORY.md 4-8).
+# ============================================================
+# Minimum time each boot-stage screen ("CAMERA / INITIALIZING", ...) stays
+# up, even if the real step behind it finishes almost instantly -- see
+# firmware/boot_stage.py. 400ms is the low end of the requested 400-700ms
+# range: enough to read a short 2-line label, without meaningfully
+# lengthening the overall boot sequence across 6 stages (~2.4s added at
+# most).
+MIN_STAGE_DISPLAY_MS = 400
