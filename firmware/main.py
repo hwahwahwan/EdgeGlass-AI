@@ -134,7 +134,8 @@ if __name__ == "__main__":
         )
 
 
-        pl.create()
+        # 카메라가 물리적으로 180도 뒤집혀 장착되어 상하좌우 반전 보정이 필요함.
+        pl.create(hmirror=True, vflip=True)
 
 
         display_size = (

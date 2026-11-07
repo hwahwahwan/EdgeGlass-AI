@@ -258,6 +258,10 @@ class CameraRig:
         debug_log("STEP: sensor.reset()")
         self.sensor.reset()
 
+        # 카메라가 물리적으로 180도 뒤집혀 장착되어 상하좌우 반전 보정이 필요함.
+        self.sensor.set_hmirror(True)
+        self.sensor.set_vflip(True)
+
         if enable_display:
             display_map = {
                 "hdmi": Display.LT9611,

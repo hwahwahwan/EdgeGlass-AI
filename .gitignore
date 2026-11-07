@@ -61,3 +61,7 @@ experiments/wifi_test/*.jpeg
 
 CLAUDE.md
 AGENTS.md
+
+docs/*
+requirements/*
+.claude
